@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Configuration
+VERSION="v0.1.0"
 SYSTEM_DEVICE_LABEL="BTRFS_ROOT"
 BTRFS_ROOT_MOUNTPOINT="/mnt/btrfs_root"
 TIMESHIFT_LOCK="/var/lock/timeshift/lock"
@@ -9,7 +10,9 @@ BTRBK_SINK="${BTRFS_ROOT_MOUNTPOINT}/btrbk/snapshots"
 BTRBK_ARCHIVE_LABEL="BTRBK_ARCHIVE"
 BTRBK_ARCHIVE_MOUNTPOINT="/mnt/btrbk_archive"
 BTRBK_ARCHIVE_SNAPSHOTS="$BTRBK_ARCHIVE_MOUNTPOINT/snapshots/"
+BTRBK_CONFIG_FILE=""
 typeset -a TARGET_SUBVOLUMES=("@" "@home")
+typeset -a BTRBK_OPTIONS=()
 
 # Check for root permissions
 check_for_root() {
@@ -17,13 +20,173 @@ check_for_root() {
 }
 
 # Helper function to handle execution vs printing
-run() { $DRY_RUN && echo "[DRY-RUN] Executing: $*" || "$@"; }
+run() {
+  if $DRY_RUN; then
+    echo "[DRY-RUN]: Executing: $*" >&2
+  else
+    "$@"
+  fi
+}
 
 fail (){ echo "[ERROR]: $1" >&2 && exit 1; }
 
-warn (){ echo "[WARNING]: $1" >&2; }
+warn (){
+  if [[ $QUIET == "false" ]]; then
+    echo "[WARNING]: $1" >&2
+  fi
+}
 
-info (){ echo "[INFO]: $1" >&2; }
+info (){
+  if [[ $QUIET == "false" ]]; then
+    echo "[INFO]   : $1" >&2
+  fi
+}
+
+
+# extended usage information
+# runs when timeshift-btrbk-bridge is called with -h as an option
+# exits 0
+show_usage() {
+	cat <<HERE;
+timeshift-btrbk-bridge $VERSION
+Usage: timeshift-btrbk-bridge [-hn] [-c cfgfile] [-l loglevel] [-p ON|OFF] [-T throttle]
+
+timeshift-btrbk-bridge creates read-only clones from timeshift read-write
+snapshots and renames them for btrbk compatibility.
+
+timeshift-btrbk-bridge comes with ABSOLUTELY NO WARRANTY.  This is free software,
+and you are welcome to redistribute it under certain conditions.
+See the GNU General Public License for details.
+
+Options:
+    -c file          - Specify alternate btrbk config file (-c /path/to/file).
+    -l loglevel      - Specify loglevel for btrbk.
+                       Must be one of error|warn|info|debug|trace.
+    -n               - Dry run. Do not modify anything. Just show what would be
+                       done when running a command.
+    -p preserve      - Specify preserve option for btrbk.
+                       Must be one of ON|OFF.
+                       If ON, -p is passed as an option to btrbk, meaning
+                       btrbk will preserve all snapshots and backups,
+                       overriding the configured retention policy.
+    -q quiet         - Suppress non-fatal warnings.
+    -t throttle      - Specify the maximum nomber of timeshift snapshots to process
+                       in one run.
+                       For testing purposes, and for catching up with timeshift when
+                       starting to use timeshift-btrbk-bridge, and not getting overwhelmed
+                       with a mass of send / receve snapshots being launched by btrbk.
+
+Commands:
+    clone            - Only clone timeshift snapshots. Do not run btrbk.
+    btrbk            - Do not clone timeshift snapshots. Only run btrbk.
+    run              - Run both clone and btrbk.
+    version          - Show the version number for timeshift-btrbk-bridge and btrbk.
+    help             - Show this help message.
+HERE
+
+	exit 0
+}
+
+parse_input() {
+  typeset -g    DRY_RUN=false
+  typeset -i -g THROTTLE=1000         # no throttling by default
+  typeset -g    PRESERVE="ON"         # retention policy is ON by default
+  typeset -g    LOGLEVEL=""           # default is info
+  typeset -g    QUIET=false
+  typeset -g    COMMAND="* Not set *" # Show this when COMMAND has not been set
+  typeset -a    INFO_MSGS=()          # Collect INFO messages
+  typeset -a    WARNING_MSGS=()       # Collect WARNING messages
+
+  if (( $# > 0 )); then               # If options provided then
+    # 1. Handle Options
+    while getopts ":c:l:np:qt:" opt; do # Go through the options
+      case $opt in
+        # Keep the DRY-RUN option first, to list it as first when set.
+        n )
+          DRY_RUN=true
+          WARNING_MSGS+=( "--- DRY RUN MODE ACTIVE (No changes will be made) ---" )
+          ;;
+
+        c )
+          if [[ ! -r $OPTARG ]]; then
+            fail "btrbk configuration file $OPTARG is not readable"
+          else
+            BTRBK_CONFIG_FILE=$OPTARG
+            BTRBK_OPTIONS+=( "-c $OPTARG")
+          fi
+          ;;
+
+        l )
+          if [[ $OPTARG =~ error|warn|info|debug|trace ]]; then
+            LOGLEVEL=$OPTARG
+            BTRBK_OPTIONS+=( "--loglevel=$LOGLEVEL" )
+            INFO_MSGS+=( "--- LOG LEVEL is set to $LOGLEVEL ---" )
+          else
+            WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
+          fi
+          ;;
+
+       p )
+         if [[ $OPTARG =~ ON|OFF ]]; then
+           PRESERVE=$OPTARG
+           if [[ $PRESERVE == ON ]]; then
+             INFO_MSGS+=( "--- PRESERVE MODE is $PRESERVE ---")
+             BTRBK_OPTIONS+=( "-p")
+           fi
+         else
+           WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
+         fi
+         ;;
+
+
+       q )
+         QUIET=true
+         ;;
+
+       t )
+          if [[ $OPTARG =~ [1-9][0-9]* ]]; then
+            THROTTLE=$OPTARG
+            INFO_MSGS+=( "--- THROTTLE is set to $THROTTLE ---" )
+          else
+            WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
+          fi
+          ;;
+
+        ? ) # Invalid option
+          fail "invalid option: -${OPTARG}"
+          ;;
+
+      esac
+    done
+
+    # Show WARNING and INFO messages.
+    # Do it here, after all options have been parsed (including QUIET).
+    # So that we can honour the QUIET option, if set.
+    for msg in "${WARNING_MSGS[@]}"; do
+      warn "$msg"
+    done
+    for msg in "${INFO_MSGS[@]}"; do
+      info "$msg"
+    done
+
+    # 2. Handle Command
+    shift $((OPTIND -1))
+    if [[ $# -eq 0 ]]; then
+      fail "Must specify one command (clone|btrbk|run|version|help)."
+    else
+      COMMAND=$1
+      shift 1
+      if [[ $# -gt 0 ]]; then
+        warn "Ignore excess arguments $@."
+      fi
+    fi
+
+    # 3. Early Help Exit
+    if [[ $COMMAND == "help" ]]; then
+      show_usage
+    fi
+  fi
+}
 
 # retry a command with arguments max(retries) | delay | fatal | command + arguments
 with_retries() {
@@ -79,92 +242,58 @@ automount_by_label () {
   fi
 }
 
-# select timeshift snapshot to transfer to btrbk sink.
-select_snapshot () {
-  typeset path=$1
-  typeset -a snapshots=($(ls -1 "$path" 2>/dev/null))
-  if [[ ${#snapshots[@]} -eq 0 ]]; then return 1; fi
-
-  echo "Available snapshots in $path:" >&2
-  for i in "${!snapshots[@]}"; do echo "$i) ${snapshots[$i]}" >&2; done
-
-  read -p "Select a snapshot (number) or press enter to skip: " choice >&2
-  if [[ -n "$choice" ]] && [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -lt "${#snapshots[@]}" ]; then echo "${path}/${snapshots[$choice]}"; else echo ""; fi
-}
-
-# Create ro snapshot: source timeshift_snapshot destination btrbk sink.
+# Create ro snapshot: source=timeshift snapshot; destination=btrbk sink.
 # ONLY when the ro snapshot is not already in the btrbk sink.
 process_snapshot() {
-  typeset selected_snapshot="$1"
-  typeset timeshift_snapshot_name=$(basename "$selected_snapshot")
-  # Format name for btrbk (Converting YYYY-MM-DD_HH-MM-SS to YYYYMMDDTHHMM)
-  typeset btrbk_snapshot_name=$(echo "$timeshift_snapshot_name" | sed 's/-//g; s/_/T/' | cut -c 1-13)
-  for subvol in "${TARGET_SUBVOLUMES[@]}"; do
-    if [[ ! -d "$BTRBK_SINK/${subvol}.$btrbk_snapshot_name" ]]; then
-      # create new ro snapshot in btrbk sink.
-      run  btrfs subvolume snapshot -r "${selected_snapshot}/${subvol}" "${BTRBK_SINK}/${subvol}.$btrbk_snapshot_name"
-      rc=$?
-      if [[ $rc -gt 0 ]]; then
-        fail "failed to create read only snapshot from ${selected_snapshot}/${subvol}"
-      fi
-    else
-      info "snapshot ${selected_snapshot}/${subvol} is already in the btrbk sink"
+    typeset selected_snapshot_path="$1"  # This should be the full absolute path
+
+    # Validation: Ensure the path is absolute and exists
+    if [[ ! "$selected_snapshot_path" =~ ^/ ]]; then
+        # If it's just a folder name, prepend the snapshots directory
+        selected_snapshot_path="${TIMESHIFT_SNAPSHOTS_DIR}/${selected_snapshot_path}"
     fi
-  done
-}
 
-get_snapshot_age() {
-  typeset SNAPSHOT="$1"
-  typeset TIMESTAMP
-  typeset -i SNAPSHOT_EPOCH
-  typeset -i NOW_EPOCH
-  # Convert YYYY-MM-DD_HH-MM-SS to YYYY-MM-DD HH:MM:SS
-  TIMESTAMP="${SNAPSHOT/_/ }"
-  TIMESTAMP="${TIMESTAMP:0:10} ${TIMESTAMP:11:2}:${TIMESTAMP:14:2}:${TIMESTAMP:17:2}"
-  typeset -i SNAPSHOT_EPOCH=$(date -u -d "$TIMESTAMP" +%s)
-  typeset -i NOW_EPOCH=$(date -u +%s)
-  echo $(( NOW_EPOCH - SNAPSHOT_EPOCH ))
-}
+    if [[ ! -d "$selected_snapshot_path" ]]; then
+        warn "Source snapshot directory not found: $selected_snapshot_path"
+        return 1
+    fi
 
-get_options() {
-  DRY_RUN=false
-  # By default select ALL scheduled snapshots (monthly + weekly + daily)
-  SELECTION=all
-  # Default minimum TIMESHIFT snapshot age to become eligable for deleteion
-  typeset -i -g DELETE_MIN_AGE=365 # in days
-  if [[ ! 0 == $# ]] # If options provided then
-  then
-    while getopts ":d:s:n" opt; do # Go through the options
-      case $opt in
-        n )
-          DRY_RUN=true
-          warn "--- DRY RUN MODE ACTIVE (No changes will be made) ---"
-          ;;
-        s )
-          SELECTION=$OPTARG
-          if [[ ! $SELECTION =~ one|monthly|weekly|daily ]]; then
-            fail "invalid option -$opt argument ${SELECTION}"; fi
-          ;;
-        d )
-          if [[ $OPTARG =~ [1-9][0-9]* ]]; then
-            DELETE_MIN_AGE=$OPTARG
-          else
-            warn "invalid option -$opt argument $OPTARG"
-          fi
-          ;;
-        ? ) # Invalid option
-          fail "invalid option: -${OPTARG}"
-          ;;
-      esac
+    typeset timeshift_snapshot_name=$(basename "$selected_snapshot_path")
+
+    # Convert YYYY-MM-DD_HH-MM-SS to YYYYMMDDTHHMM
+    typeset btrbk_snapshot_name=$(echo "$timeshift_snapshot_name" | sed 's/-//g; s/_/T/' | cut -c 1-13)
+
+    for subvol in "${TARGET_SUBVOLUMES[@]}"; do
+        typeset src_subvol="${selected_snapshot_path}/${subvol}"
+        typeset dest_subvol="${BTRBK_SINK}/${subvol}.${btrbk_snapshot_name}"
+
+        # 1. Check if source subvolume exists (e.g., does @home exist in this snapshot?)
+        if [[ ! -d "$src_subvol" ]]; then
+            warn "Subvolume $subvol not found in $timeshift_snapshot_name, skipping."
+            continue
+        fi
+
+        # 2. Check if the destination already exists in the sink
+        if [[ ! -d "$dest_subvol" ]]; then
+            info "Creating read-only snapshot ${subvol}.${btrbk_snapshot_name} in the btrbk sink."
+
+            # Use absolute paths for both source and destination
+            run btrfs subvolume snapshot -r "$src_subvol" "$dest_subvol"
+
+            rc=$?
+            if [[ $rc -gt 0 ]]; then
+                fail "Failed to create read-only snapshot for $src_subvol (return code $rc)"
+            fi
+        else
+            info "Snapshot ${subvol}.${btrbk_snapshot_name} already exists in btrbk sink."
+        fi
     done
-    shift $((OPTIND-1))
-  fi
 }
 
 acquire_timeshift_lock(){
   if [[ ! -f $TIMESHIFT_LOCK ]]; then
     echo "$$;" > $TIMESHIFT_LOCK
-    cat $TIMESHIFT_LOCK
+    # cat $TIMESHIFT_LOCK
   else return 1
   fi
 }
@@ -182,19 +311,30 @@ cleanup () {
   typeset exit_code=$?
   typeset mp
   trap - EXIT
-  set -x
+
   if [[ -f $TIMESHIFT_LOCK ]]; then
     # check if it is the lock we created
     if grep -F "$$;" $TIMESHIFT_LOCK; then
       rm $TIMESHIFT_LOCK
+      rc=$?
+      info "Error removing the timeshift lock (return code $rc)."
+      send_desktop_notification "critical" "timeshift btrbk bridge" "Could not remove the timeshift lock.. All timeshift commands will fail until the lock (file /run/timeshift/lock/timeshift) is removed. Please investigate."
     fi
   fi
+
   # unmount filesystems mounted by this script
   for mp in "${mounted_by_this_script[@]}"; do
     umount $mp
     rc=$?
     if [[ 0 -ne $rc ]]; then fail "umount $mp returned $rc."; fi
   done
+
+  if [[ $exit_code > 0 ]] && [[ -n "$PHASE" ]]; then
+    info "A command in phase $PHASE returned $exit_code."
+    send_desktop_notification "critical" "timeshift btrbk bridge" "timeshift-btrbk-bridge returned $exit_code in phase $PHASE. Please investigate."
+  fi
+
+  exit $exit_code
 }
 
 have_command() { command -v $1 >/dev/null; }
@@ -315,14 +455,74 @@ send_desktop_notification() {
 
 } # End of send_desktop_notification
 
+do_clone() {
+  # 1. Selection phase
+  PHASE="Clone"
+
+  # NOTE: Acquire the timeshift lock
+  # Prevent timeshift to create/delete snapshots while we are processing them.
+  with_retries 3 2 true acquire_timeshift_lock
+  # We hold the timeshift lock
+  typeset -a timeshift_snapshots=( $(ls -1 $TIMESHIFT_SNAPSHOTS_DIR) )
+  # printf '%s\n' "${timeshift_snapshots[@]}"
+
+  # 2. Fill btrbk sink
+  PHASE="Fill btrbk sink"
+  # Throttle the transfer to btrbk sink. Limit to 5 snapshots per run.
+  typeset -i count=0            # start from zero, as does timeshift
+  # Process snapshots
+  # NOTE: take THROTTLE into account
+  info "Processing snapshots"
+  for snapshot_name in "${timeshift_snapshots[@]:0:${THROTTLE}}"; do
+    info "snapshot #$count - $snapshot_name ..."
+    # Construct absolute path here for clarity
+    full_path="${TIMESHIFT_SNAPSHOTS_DIR}/${snapshot_name}"
+    process_snapshot "$full_path"
+    # Ignore return code 1 (snapshot does not exist any more)
+    # Fatal errors are caught and stop the script.
+    (( count++ ))
+  done
+  unset count
+
+  # Relinquish the timeshift lock.
+  run relinquish_timeshift_lock
+}
+
+do_btrbk() {
+
+  # 3. Run btrbk send / receive
+  PHASE="Btrbk send/receive"
+  # We mount BTRBK_ARCHIVE here for test purposes.
+  # In production this script will run automatically using a systemd timer, and
+  # BTRBK_ARCHIVE will be mounted using a mount unit.
+  automount_by_label BTRBK_ARCHIVE $BTRBK_ARCHIVE_MOUNTPOINT
+
+  # if dry run, do not just show the btrbk command, but run it with dryrun
+  if $DRY_RUN; then
+    /usr/bin/btrbk "${BTRBK_OPTIONS[@]}" dryrun
+  else
+    run /usr/bin/btrbk "${BTRBK_OPTIONS[@]}" run
+  fi
+
+  rc=$?
+
+  # btrbk return code 10 means "Completed with warnings"
+  # (often due to stray subvolumes or skipped snapshots)
+  if [[ $rc -eq 10 ]]; then
+    warn "btrbk completed with warnings (RC 10). This is likely due to re-introduced snapshots."
+  elif [[ $rc -gt 0 ]]; then
+    fail "btrbk returned a fatal error: $rc."
+  fi
+}
+
 # ----- start Main -----
+
+info "Running $0 $*"
 
 check_for_root
 
-get_options "$@"
+parse_input "$@"
 
-# 1. Selection phase
-phase="Selection"
 # Mount BTRFS_ROOT
 # and keep track of mountpoints mounted by this script
 typeset -a mounted_by_this_script=()
@@ -339,147 +539,33 @@ automount_by_label BTRFS_ROOT
 # 'EXIT' catches any termination of the script
 trap cleanup EXIT
 
-typeset -a selected_snapshots=()
-typeset -a final_selection=()
-have_monthly=false; have_weekly=false; have_daily=false;
-case $SELECTION in
-  one )
-    # Select One Timeshift snapshot - consider all snapshots
-    snapshot=$(select_snapshot "${TIMESHIFT_SNAPSHOTS_DIR}")
-    if [[ -z "$snapshot" ]]; then warn "no snapshot selected." >&2; exit 0;
-    else
-      final_selection+=($snapshot)
-    fi
+case $COMMAND in
+  clone )
+    # clone only
+    do_clone
     ;;
+
+  btrbk )
+    # btrbk only
+    do_btrbk
+    ;;
+
+  run )
+    do_clone
+    do_btrbk
+    # clone AND btrbk
+    ;;
+
+  version )
+    # show version
+    info "timeshift-btrbk-bridge version=$VERSION"
+    btrbk --version
+    exit 0
+    ;;
+
   * )
-    # NOTE: Acquire the timeshift lock
-    # We use the links timeshift creates for scheduled snapshots.
-    # These links are removed and rebuilt when timeshift creates/deletes snapshots.
-    # We want to protect ourselves against changes while selecting snapshots.
-    # Why use the links? To exclude 'boot' and 'hourly' snapshot from selection,
-    # unless they have been tagged 'D', 'W' or 'M'.
-    with_retries 3 2 true acquire_timeshift_lock
-    # we have acquired the lock
-    case $SELECTION in
-      monthly )
-        monthly_snapshots_path="${TIMESHIFT_SNAPSHOTS_DIR}/../snapshots-monthly"
-        if [[ -d "${monthly_snapshots_path}" ]]; then
-          typeset -a snapshots_monthly
-          snapshots_monthly=($(ls -1 "${monthly_snapshots_path}"))
-          if [[ "${#snapshots_monthly[@]}" -gt 0 ]]; then have_monthly=true; fi
-        fi
-        ;;
+    # invalid command
+    fail "invalid command $COMMAND."
+    ;;
 
-      weekly )
-        weekly_snapshots_path="${TIMESHIFT_SNAPSHOTS_DIR}/../snapshots-weekly"
-        if [[ -d "${weekly_snapshots_path}" ]]; then
-          typeset -a snapshots_weekly
-          snapshots_weekly=($(ls -1 "${weekly_snapshots_path}"))
-          if [[ "${#snapshots_weekly[@]}" -gt 0 ]]; then have_weekly=true; fi
-        fi
-        ;;
-
-      daily )
-        daily_snapshots_path="${TIMESHIFT_SNAPSHOTS_DIR}/../snapshots-daily"
-        if [[ -d "${daily_snapshots_path}" ]]; then
-          typeset -a snapshots_daily
-          snapshots_daily=($(ls -1 "${daily_snapshots_path}"))
-          printf '%s\n' "${snapshots_daily[@]}"
-          if [[ "${#snapshots_daily[@]}" -gt 0 ]]; then have_daily=true; fi
-        fi
-        ;;
-
-      all )  # default select option: consider monthly + weekly + daily snapshots
-        monthly_snapshots_path="${TIMESHIFT_SNAPSHOTS_DIR}/../snapshots-monthly"
-        if [[ -d "${monthly_snapshots_path}" ]]; then
-          typeset -a snapshots_monthly
-          snapshots_monthly=($(ls -1 "${monthly_snapshots_path}"))
-          if [[ "${#snapshots_monthly[@]}" -gt 0 ]]; then have_monthly=true; fi
-        fi
-
-        weekly_snapshots_path="${TIMESHIFT_SNAPSHOTS_DIR}/../snapshots-weekly"
-        if [[ -d "${weekly_snapshots_path}" ]]; then
-          typeset -a snapshots_weekly
-          snapshots_weekly=($(ls -1 "${weekly_snapshots_path}"))
-          if [[ "${#snapshots_weekly[@]}" -gt 0 ]]; then have_weekly=true; fi
-        fi
-
-        daily_snapshots_path="${TIMESHIFT_SNAPSHOTS_DIR}/../snapshots-daily"
-        if [[ -d "${daily_snapshots_path}" ]]; then
-          typeset -a snapshots_daily
-          snapshots_daily=($(ls -1 "${daily_snapshots_path}"))
-          if [[ "${#snapshots_daily[@]}" -gt 0 ]]; then have_daily=true; fi
-        fi
-        ;;
-    esac
-
-    # Done with the selection. Relinquish the timeshift lock.
-    run relinquish_timeshift_lock
-
-    # collect ALL selected snapshots
-    selected_snapshots=( "${snapshots_monthly[@]}" "${snapshots_weekly[@]}" "${snapshots_daily[@]}" )
-    if ($have_monthly || $have_weekly); then
-      # we MAY have duplicates, which is NOT a problem. Duplicates will NOT be transferred to the btrbk sink.
-      # We MAY have selected snapshots OUT OF CHRONOLOGICAL ORDER.
-      # That is unacceptable: we want to reduce DELTA's between
-      # snapshots in the btrbk sink to a minimum.
-      # dailies are guaranteed to be in chronological order.
-      mapfile -t final_selection < <(printf '%s\n' "${selected_snapshots[@]}" | sort -u)
-    else
-      final_selection=("${selected_snapshots[@]}")
-    fi
 esac
-
-# 2. Fill btrbk sink
-phase="Fill btrbk sink"
-# Throttle the transfer to btrbk sink. Limit to 5 snapshots per run.
-typeset -i max_count=5
-typeset -i count=1
-# Process snapshots
-# NOTE: take throttling into account
-for snapshot in "${final_selection[@]:0:${max_count}}"; do
-  echo "#$count processing $snapshot ..."
-  process_snapshot "$snapshot"
-  (( count++ ))
-done
-
-# 3. Run btrbk: send snapshots in btrbk sink to the btrbk archive
-phase="Btrbk send/receive"
-# We mount BTRBK_ARCHIVE here for test purposes.
-# In production this script will run automatically using a systemd timer, and
-# BTRBK_ARCHIVE will be mounted using a mount unit.
-automount_by_label BTRBK_ARCHIVE $BTRBK_ARCHIVE_MOUNTPOINT
-
-run btrbk -l info -c /etc/btrbk/btrbk.conf run
-
-rc=$?
-if [[ $rc -gt 0 ]]; then
-  fail "btrbk returned $rc."
-fi
-
-# 4. Delete selected TIMESHIFT snapshots OLDER than configured number of days.
-#    ONLY if ALL snapshots were selected.
-#    NOTE: take throttling into account!
-if [[ $DELETE_MIN_AGE -lt 365 ]]; then
-  phase="Timeshift delete"
-  if [[ "$SELECTION" == "all" ]]; then
-    # Process snapshots
-    typeset -i age
-    for snapshot in "${final_selection[@]:0:${max_count}}"; do
-      age=$(get_snapshot_age $snapshot) # age in seconds
-      age=$(( age / 86400 ))            # age in days
-      if (( age > $DELETE_MIN_AGE )); then
-        with_retries 3 2 false timeshift --delete "$snapshot"
-        warn "timeshift snapshot $snapshot deleted (age = $age days)."
-      fi
-    done
-  fi
-fi
-
-# 5.Get the current usage percentage of the USB mount
-USAGE=$(df /mnt/btrbk_archive | awk 'NR==2 {print $5}' | sed 's/%//')
-THRESHOLD=1
-
-if [ "$USAGE" -gt "$THRESHOLD" ]; then
-  send_desktop_notification "critical" "Disk usage theshold exceeded." "USB btrbk archive filesystem is at ${USAGE}% capacity. Consider pruning old snapshots."
-fi
