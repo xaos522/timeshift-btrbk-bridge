@@ -11,11 +11,13 @@ A bridge tool that combines [Timeshift](https://github.com/teejee2008/timeshift)
 - **Short-term protection**: Use Timeshift for frequent, system-level snapshots
 - **Long-term backups**: Leverage Btrbk for efficient incremental backups to external storage
 - **Automated workflow**: Run as a systemd service or manual command-line tool
+- **Smart snapshot selection**: Only processes snapshots newer than the latest archived version
 - **No manual intervention**: Automatically clones and renames Timeshift snapshots for Btrbk compatibility
 
 ## Features
 
 - ✅ Converts Timeshift snapshots to read-only Btrbk-compatible snapshots
+- ✅ Automatically detects and skips already-archived snapshots
 - ✅ Automatically mounts/unmounts required Btrfs volumes
 - ✅ Timeshift lock management to prevent concurrent snapshot operations
 - ✅ Desktop notifications for success/failure events
@@ -23,6 +25,7 @@ A bridge tool that combines [Timeshift](https://github.com/teejee2008/timeshift)
 - ✅ Throttling support for gradual catch-up processing
 - ✅ Configurable log levels and btrbk options
 - ✅ Systemd integration with automatic restart on failure
+- ✅ Error handling with `set -euo pipefail` for safety
 - ✅ Root-only execution (safety check)
 
 ## Requirements
@@ -31,6 +34,7 @@ A bridge tool that combines [Timeshift](https://github.com/teejee2008/timeshift)
 - **Btrfs utilities**: `btrfs` command-line tools
 - **Timeshift**: Installed and configured for snapshot creation
 - **Btrbk**: Installed and configured for backup management
+- **Bash 4.0+**: For associative arrays support
 - **systemd**: For service and timer management (optional but recommended)
 - **notify-send**: For desktop notifications (optional)
 - **Root privileges**: Required to execute the script
@@ -239,16 +243,32 @@ sudo systemctl enable --now timeshift-btrbk-bridge.timer
 
 ### Snapshot Processing Pipeline
 
-1. **Lock Acquisition**: Acquires Timeshift lock to prevent concurrent snapshot operations
-2. **Snapshot Discovery**: Lists all Timeshift snapshots
-3. **Snapshot Cloning**: 
+1. **Root Check**: Verifies script is running as root
+2. **Input Parsing**: Processes command-line options and commands
+3. **Mount BTRFS_ROOT**: Automatically mounts root Btrfs filesystem
+4. **Mount BTRBK_ARCHIVE**: Mounts archive storage and retrieves latest snapshots
+5. **Query Latest Snapshots**: Uses `btrbk list latest` to determine which snapshots are already archived
+6. **Lock Acquisition**: Acquires Timeshift lock to prevent concurrent snapshot operations
+7. **Snapshot Discovery**: Lists all Timeshift snapshots
+8. **Intelligent Snapshot Cloning**:
    - Converts Timeshift timestamp format (YYYY-MM-DD_HH-MM-SS) to Btrbk format (YYYYMMDDTHHMM)
-   - Creates read-only Btrfs snapshots in the btrbk sink
-   - Skips existing snapshots (idempotent)
-4. **Lock Release**: Relinquishes the Timeshift lock
-5. **Archive Mount**: Automatically mounts external Btrbk archive if available
-6. **Btrbk Execution**: Runs btrbk to send/receive snapshots to archive
-7. **Notifications**: Sends desktop notifications on success/failure
+   - Compares snapshots against latest archived versions
+   - **Skips snapshots older than the latest archived version** (avoids redundant work)
+   - Creates read-only Btrfs snapshots only for new snapshots
+   - Skips existing snapshots in btrbk sink (idempotent)
+9. **Lock Release**: Relinquishes the Timeshift lock
+10. **Btrbk Execution**: Runs btrbk to send/receive new snapshots to archive
+11. **Notifications**: Sends desktop notifications on success/failure
+12. **Cleanup**: Unmounts filesystems and handles errors gracefully
+
+### Smart Snapshot Selection
+
+The tool now fetches the latest archived snapshots and compares incoming Timeshift snapshots against them. This means:
+
+- **First run**: All Timeshift snapshots newer than the latest archived snapshot are processed
+- **Subsequent runs**: Only new Timeshift snapshots (created after the last run) are processed
+- **Efficiency**: Avoids redundant cloning and archive operations
+- **Error recovery**: Snapshots can be re-processed if needed
 
 ### File Structure
 
@@ -316,12 +336,21 @@ sudo btrbk -c /etc/btrbk/btrbk.conf dryrun
 sudo journalctl -u timeshift-btrbk-bridge.service -n 100
 ```
 
+### Getting Latest Snapshots Fails
+
+If `btrbk list latest` fails or returns no results:
+- Ensure BTRBK_ARCHIVE is mounted
+- Verify btrbk configuration is correct
+- Check that you have at least one snapshot already backed up
+- Review journal logs: `sudo journalctl -u timeshift-btrbk-bridge.service`
+
 ## Performance Considerations
 
 - **Throttling**: Use `-t` option to limit snapshots per run (useful for initial catch-up)
 - **I/O Priority**: The service uses `ionice -c 3` (idle I/O priority)
 - **Incremental Backups**: Btrbk only transfers changed blocks, minimizing bandwidth
 - **Schedule**: Run during off-peak hours to minimize system impact
+- **Archive Queries**: First run queries btrbk archive to determine starting point
 
 ## Desktop Notifications
 
@@ -331,12 +360,25 @@ The script sends notifications via `notify-send`:
 
 Note: Requires an active GUI session and `notify-send` command.
 
+## Recent Changes
+
+### Latest Update: Check Latest Archived Snapshots
+
+- Added `get_latest_snapshots()` function to query Btrbk archive
+- Snapshots are now compared against the latest archived version
+- Old/redundant snapshots are automatically skipped
+- Improved error handling with `set -euo pipefail`
+- Better script safety and error propagation
+- Archive is now mounted at startup to get latest snapshot info
+- Uses associative arrays for efficient snapshot tracking
+
 ## Limitations
 
 - Requires Btrfs filesystem (cannot be used with LVM/ext4/other filesystems)
 - Assumes specific Btrfs subvolume structure (`@`, `@home`, etc.)
 - Requires root privileges to execute
 - Desktop notifications require active GUI session
+- Archive must be accessible to query latest snapshots
 
 ## Contributing
 
