@@ -104,18 +104,41 @@ TARGET_SUBVOLUMES=("@" "@home")            # Btrfs subvolumes to process
 Create/update your Btrbk configuration file (e.g., `/etc/btrbk/btrbk.conf`):
 
 ```ini
-# Volume and subvolume to be backed up
+transaction_log            /var/log/btrbk.log
+lockfile                   /var/lock/btrbk.lock
+timestamp_format           long
+# the daily backup is the first one after 09:00
+preserve_hour_of_day       9
+# Monday is the first day of week
+preserve_day_of_week       monday
+
+# --- source retention policy
+# preserve all btrbk sink snapshots for at least 15 days
+# (one day more than the timeshift retention period)
+# to prevent timeshift-btrbk-bridge.sh from adding old timeshift snapshots to the btrbk sink that have already been sent to the btrbk archive.
+snapshot_preserve_min      15d
+# preserve 14 latest daily, 8 weekly, 6 monthly, 1 annual snapshots
+# snapshot_preserve        14d 8w 6m 1y
+# snapshot-preserve-min is sufficient, no extra snapshot-preserve needed
+snapshot_preserve          0h
+
+# --- target retention policy
+# do not preserve temporary snapshots
+target_preserve_min        latest
+# preserve 24 latest hourly, 14 latest daily, 4 weekly, 6 monthly, 1 annual snapshots
+target_preserve            24h 14d 4w 6m 1y
+
+# --- archive retention policy
+# preserve all snapshot archive
+archive_preserve_min       all
+
+snapshot_dir               btrbk/snapshots
+
 volume /mnt/btrfs_root
+  snapshot_create  no
+  target send-receive /mnt/btrbk_archive/snapshots
   subvolume @
   subvolume @home
-  
-  target send-receive /mnt/btrbk_archive
-
-# Retention policy
-snapshot_preserve_min all
-snapshot_preserve_days 0
-target_preserve_min all
-target_preserve_days 0
 ```
 
 ## Usage

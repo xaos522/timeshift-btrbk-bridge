@@ -1,18 +1,21 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Configuration
 VERSION="v0.1.0"
-SYSTEM_DEVICE_LABEL="BTRFS_ROOT"
-BTRFS_ROOT_MOUNTPOINT="/mnt/btrfs_root"
-TIMESHIFT_LOCK="/var/lock/timeshift/lock"
+SYSTEM_DEVICE_LABEL="BTRFS_ROOT"           # Label of root Btrfs filesystem
+BTRFS_ROOT_MOUNTPOINT="/mnt/btrfs_root"    # Mount point for root volume
+TIMESHIFT_LOCK="/var/lock/timeshift/lock"  # Timeshift lock file
 TIMESHIFT_SNAPSHOTS_DIR="${BTRFS_ROOT_MOUNTPOINT}/timeshift-btrfs/snapshots"
+                                           # Path ti timeshift snapshots
 BTRBK_SINK="${BTRFS_ROOT_MOUNTPOINT}/btrbk/snapshots"
-BTRBK_ARCHIVE_LABEL="BTRBK_ARCHIVE"
+                                           # Path to btrbk snapshots (sink)
 BTRBK_ARCHIVE_MOUNTPOINT="/mnt/btrbk_archive"
-BTRBK_ARCHIVE_SNAPSHOTS="$BTRBK_ARCHIVE_MOUNTPOINT/snapshots/"
-BTRBK_CONFIG_FILE=""
-typeset -a TARGET_SUBVOLUMES=("@" "@home")
-typeset -a BTRBK_OPTIONS=()
+                                           # Path to btrbk archive
+BTRBK_CONFIG_FILE=""                       # Path to the btrbk config file
+typeset -a TARGET_SUBVOLUMES=("@" "@home") # Btrfs subvolumes to process
+typeset -a BTRBK_OPTIONS=()                # Array of btrbk options
+
+set -euo pipefail
 
 # Check for root permissions
 check_for_root() {
@@ -42,10 +45,9 @@ info (){
   fi
 }
 
-
-# extended usage information
-# runs when timeshift-btrbk-bridge is called with -h as an option
-# exits 0
+# Function to show extended usage information
+# Runs when timeshift-btrbk-bridge is called with -h as an option
+# Exits 0
 show_usage() {
 	cat <<HERE;
 timeshift-btrbk-bridge $VERSION
@@ -106,7 +108,6 @@ parse_input() {
           DRY_RUN=true
           WARNING_MSGS+=( "--- DRY RUN MODE ACTIVE (No changes will be made) ---" )
           ;;
-
         c )
           if [[ ! -r $OPTARG ]]; then
             fail "btrbk configuration file $OPTARG is not readable"
@@ -115,7 +116,6 @@ parse_input() {
             BTRBK_OPTIONS+=( "-c $OPTARG")
           fi
           ;;
-
         l )
           if [[ $OPTARG =~ error|warn|info|debug|trace ]]; then
             LOGLEVEL=$OPTARG
@@ -125,7 +125,6 @@ parse_input() {
             WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
           fi
           ;;
-
        p )
          if [[ $OPTARG =~ ON|OFF ]]; then
            PRESERVE=$OPTARG
@@ -137,12 +136,9 @@ parse_input() {
            WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
          fi
          ;;
-
-
        q )
          QUIET=true
          ;;
-
        t )
           if [[ $OPTARG =~ [1-9][0-9]* ]]; then
             THROTTLE=$OPTARG
@@ -151,7 +147,6 @@ parse_input() {
             WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
           fi
           ;;
-
         ? ) # Invalid option
           fail "invalid option: -${OPTARG}"
           ;;
@@ -177,7 +172,7 @@ parse_input() {
       COMMAND=$1
       shift 1
       if [[ $# -gt 0 ]]; then
-        warn "Ignore excess arguments $@."
+        warn "Ignore excess arguments $*."
       fi
     fi
 
@@ -196,16 +191,18 @@ with_retries() {
   shift 3
   typeset -i count=1
   while true; do
-    run "$@" && break || {
-        if (( count < max)); then
-          warn "Command $@ failed. Attempt $count/$max"
-          ((count++))
-          sleep $delay
-        else
-           typeset msg="Command $@ has failed after $count attempts."
-          if fatal; then fail "$msg"; else warn "$msg"; fi
-        fi
-      }
+    if ! run "$@"; then
+      if (( count < max)); then
+        warn "Command $* failed. Attempt $count/$max"
+        ((count++))
+        sleep $delay
+      else
+        typeset msg="Command $* has failed after $count attempts."
+        if $fatal; then fail "$msg"; else warn "$msg"; fi
+      fi
+      else
+        break
+    fi
   done
 }
 
@@ -224,10 +221,10 @@ automount_by_label () {
   if [[ -n "$MOUNTPOINT" ]]; then
 
     if [[ ! -d $MOUNTPOINT ]]; then
-      mkdir -p $MOUNTPOINT 2>/dev/null || fail "failed to create mountpoint $MOUNTPOINT"
+      mkdir -p "$MOUNTPOINT" 2>/dev/null || fail "failed to create mountpoint $MOUNTPOINT"
     fi
 
-    if ! mountpoint -q $MOUNTPOINT; then
+    if ! mountpoint -q "$MOUNTPOINT"; then
 
       # Attempt the mount
       mount LABEL="$LABEL"
@@ -243,28 +240,30 @@ automount_by_label () {
 }
 
 # Create ro snapshot: source=timeshift snapshot; destination=btrbk sink.
-# ONLY when the ro snapshot is not already in the btrbk sink.
+# ONLY when the snapshot is not older than the latest archived snapshot
+# AND the ro snapshot is not already in the btrbk sink.
 process_snapshot() {
-    typeset selected_snapshot_path="$1"  # This should be the full absolute path
+    typeset snapshot_path="$1"  # This should be the full absolute path
 
     # Validation: Ensure the path is absolute and exists
-    if [[ ! "$selected_snapshot_path" =~ ^/ ]]; then
+    if [[ ! "$snapshot_path" =~ ^/ ]]; then
         # If it's just a folder name, prepend the snapshots directory
-        selected_snapshot_path="${TIMESHIFT_SNAPSHOTS_DIR}/${selected_snapshot_path}"
+        snapshot_path="${TIMESHIFT_SNAPSHOTS_DIR}/${snapshot_path}"
     fi
 
-    if [[ ! -d "$selected_snapshot_path" ]]; then
-        warn "Source snapshot directory not found: $selected_snapshot_path"
-        return 1
+    if [[ ! -d "$snapshot_path" ]]; then
+        fail "Source snapshot directory not found: $snapshot_path"
     fi
 
-    typeset timeshift_snapshot_name=$(basename "$selected_snapshot_path")
+    typeset timeshift_snapshot_name
+    timeshift_snapshot_name=$(basename "$snapshot_path")
 
     # Convert YYYY-MM-DD_HH-MM-SS to YYYYMMDDTHHMM
-    typeset btrbk_snapshot_name=$(echo "$timeshift_snapshot_name" | sed 's/-//g; s/_/T/' | cut -c 1-13)
+    typeset btrbk_snapshot_name
+    btrbk_snapshot_name=$(echo "$timeshift_snapshot_name" | sed 's/-//g; s/_/T/' | cut -c 1-13)
 
     for subvol in "${TARGET_SUBVOLUMES[@]}"; do
-        typeset src_subvol="${selected_snapshot_path}/${subvol}"
+        typeset src_subvol="${snapshot_path}/${subvol}"
         typeset dest_subvol="${BTRBK_SINK}/${subvol}.${btrbk_snapshot_name}"
 
         # 1. Check if source subvolume exists (e.g., does @home exist in this snapshot?)
@@ -273,7 +272,14 @@ process_snapshot() {
             continue
         fi
 
-        # 2. Check if the destination already exists in the sink
+        # 2. Check if snapshot is older than the latest archived snapshot for this subvolume
+        warn "Comparing ${subvol}.${btrbk_snapshot_name} to ${LATEST_SNAPSHOTS[$subvol]}"
+        if [[ "${subvol}.${btrbk_snapshot_name}" < "${LATEST_SNAPSHOTS[$subvol]}" ]]; then
+          warn "Snapshot $btrbk_snapshot_name is older than the latest archived snapshot for this subvolume. Skipping..."
+          continue
+        fi
+
+        # 3. Check if the destination already exists in the sink
         if [[ ! -d "$dest_subvol" ]]; then
             info "Creating read-only snapshot ${subvol}.${btrbk_snapshot_name} in the btrbk sink."
 
@@ -324,12 +330,12 @@ cleanup () {
 
   # unmount filesystems mounted by this script
   for mp in "${mounted_by_this_script[@]}"; do
-    umount $mp
+    umount "$mp"
     rc=$?
     if [[ 0 -ne $rc ]]; then fail "umount $mp returned $rc."; fi
   done
 
-  if [[ $exit_code > 0 ]] && [[ -n "$PHASE" ]]; then
+  if [[ $exit_code -gt 0 ]] && [[ -n "$PHASE" ]]; then
     info "A command in phase $PHASE returned $exit_code."
     send_desktop_notification "critical" "timeshift btrbk bridge" "timeshift-btrbk-bridge returned $exit_code in phase $PHASE. Please investigate."
   fi
@@ -337,7 +343,7 @@ cleanup () {
   exit $exit_code
 }
 
-have_command() { command -v $1 >/dev/null; }
+have_command() { command -v "$1" >/dev/null; }
 
 send_desktop_notification() {
 
@@ -367,7 +373,7 @@ send_desktop_notification() {
       if [[ "$item" =~ $pattern ]]; then
         active="${BASH_REMATCH[3]}"
         nr_gui_user_id="${BASH_REMATCH[1]}"
-        ( [[ "$active" != active ]] || [[ "$user_id" == 0 ]] ) && continue
+        { [[ "$active" != active ]] || [[ "$user_id" == 0 ]]; }  && continue
         nr_gui_user="${BASH_REMATCH[2]}"
         break
       else
@@ -414,7 +420,6 @@ send_desktop_notification() {
       nr_gui_user_id=$(id -u "$gui_user")
     fi
   }
-
 
   typeset whereami="send_desktop_notification"
   typeset urgency="$1"   # low, normal, critical
@@ -463,7 +468,14 @@ do_clone() {
   # Prevent timeshift to create/delete snapshots while we are processing them.
   with_retries 3 2 true acquire_timeshift_lock
   # We hold the timeshift lock
-  typeset -a timeshift_snapshots=( $(ls -1 $TIMESHIFT_SNAPSHOTS_DIR) )
+  typeset -a timeshift_snapshots
+  # Enable nullglob so it returns an empty array if no snapshots exist
+  shopt -s nullglob
+  # Populate array directly with absolute paths
+  timeshift_snapshots=( "$TIMESHIFT_SNAPSHOTS_DIR"/*/ )
+  # Remove trailing slash
+  timeshift_snapshots=( "${timeshift_snapshots[@]%/}" )
+  shopt -u nullglob
   # printf '%s\n' "${timeshift_snapshots[@]}"
 
   # 2. Fill btrbk sink
@@ -473,14 +485,12 @@ do_clone() {
   # Process snapshots
   # NOTE: take THROTTLE into account
   info "Processing snapshots"
-  for snapshot_name in "${timeshift_snapshots[@]:0:${THROTTLE}}"; do
-    info "snapshot #$count - $snapshot_name ..."
-    # Construct absolute path here for clarity
-    full_path="${TIMESHIFT_SNAPSHOTS_DIR}/${snapshot_name}"
-    process_snapshot "$full_path"
+  for snapshot in "${timeshift_snapshots[@]:0:${THROTTLE}}"; do
+    info "snapshot #$count - $snapshot ..."
+    process_snapshot "$snapshot"
     # Ignore return code 1 (snapshot does not exist any more)
-    # Fatal errors are caught and stop the script.
-    (( count++ ))
+    # Fatal errors while processing a snapshot are caught and stop the script.
+    (( ++count ))
   done
   unset count
 
@@ -489,7 +499,6 @@ do_clone() {
 }
 
 do_btrbk() {
-
   # 3. Run btrbk send / receive
   PHASE="Btrbk send/receive"
   # We mount BTRBK_ARCHIVE here for test purposes.
@@ -515,13 +524,37 @@ do_btrbk() {
   fi
 }
 
-# ----- start Main -----
+# Function to get the latest snapshots on BTRBK_ARCHIVE for subvolumes @ and @home
+get_latest_snapshots () {
+  set -v
+  # Capture output of 'btrbk --format=raw list latest'
+  mapfile -t btrbk_list_latest < <(btrbk --format=raw list latest)
+  typeset format type source_url source_host source_port source_subvolume snapshot_subvolume \
+          snapshot_name status target_url target_host target_port target_subvolume target_type \
+          source_rsh target_rsh
+  typeset entry key value
 
-info "Running $0 $*"
+  for entry in "${btrbk_list_latest[@]}"; do
+    eval "$entry"
+    printf '%s\n' "$snapshot_name"
+    printf '%s\n' "$snapshot_subvolume"
+    key="$snapshot_name"
+    value="$(basename "$snapshot_subvolume")"
+    printf '%s\n' "key = $key"
+    printf '%s\n' "value = $value"
+    printf '%s\n' "Latest archived snapshot for $key is $value"
+    LATEST_SNAPSHOTS["$key"]="$value"
+  done
+  set +v
+}
+
+# ----- start Main -----
 
 check_for_root
 
 parse_input "$@"
+
+info "Running $0 $*"
 
 # Mount BTRFS_ROOT
 # and keep track of mountpoints mounted by this script
@@ -536,6 +569,15 @@ automount_by_label BTRFS_ROOT
 # mounted_by_this_script+=($BTRFS_ROOT_MOUNTPOINT)
 # findmnt -t btrfs
 
+# Mount btrbk_archive here - 'btrbk list latest' REQUIRES BTRBK_ARCHIVE mounted
+#
+automount_by_label BTRBK_ARCHIVE
+# Get latest snapshots per subvolume.
+# Used to decide which timeshift snapshots we want to process:
+# Snapshots older than the latest snapshot can be skipped.
+typeset -A LATEST_SNAPSHOTS
+get_latest_snapshots
+
 # 'EXIT' catches any termination of the script
 trap cleanup EXIT
 
@@ -544,28 +586,23 @@ case $COMMAND in
     # clone only
     do_clone
     ;;
-
   btrbk )
     # btrbk only
     do_btrbk
     ;;
-
   run )
     do_clone
     do_btrbk
     # clone AND btrbk
     ;;
-
   version )
     # show version
     info "timeshift-btrbk-bridge version=$VERSION"
     btrbk --version
     exit 0
     ;;
-
   * )
     # invalid command
     fail "invalid command $COMMAND."
     ;;
-
 esac

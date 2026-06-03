@@ -13,7 +13,7 @@ User=root
 Environment="HOME=/root"
 ExecStart=ionice -c 3 /usr/local/bin/timeshift-btrbk-bridge.sh -l info run
 # Trigger the notification script after success
-ExecStartPost=/usr/local/bin/send-desktop-notification.sh -i timeshift -U critical "Timeshift btrbk bridge" "Timeshift btrbk bridge completed successfully."
+# ExecStartPost=/usr/local/bin/send-desktop-notification.sh -i timeshift -U low "Timeshift btrbk bridge" "Timeshift btrbk bridge completed successfully."
 
 # --- FAST RETRY CONFIGURATION ---
 Restart=on-failure
