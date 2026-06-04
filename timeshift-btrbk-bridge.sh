@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Configuration
-VERSION="v0.1.0"
+VERSION="v0.1.1"
 SYSTEM_DEVICE_LABEL="BTRFS_ROOT"           # Label of root Btrfs filesystem
 BTRFS_ROOT_MOUNTPOINT="/mnt/btrfs_root"    # Mount point for root volume
 TIMESHIFT_LOCK="/var/lock/timeshift/lock"  # Timeshift lock file
@@ -15,43 +15,83 @@ BTRBK_CONFIG_FILE=""                       # Path to the btrbk config file
 typeset -a TARGET_SUBVOLUMES=("@" "@home") # Btrfs subvolumes to process
 typeset -a BTRBK_OPTIONS=()                # Array of btrbk options
 
+# Path to logger module
+LOGGER_PATH="/home/me/.local/lib/bash-logger/logging.sh"
+
 set -euo pipefail
+
+# Check if logger exists
+if [[ ! -f "$LOGGER_PATH" ]]; then
+  echo "Error: Logger module not found at $LOGGER_PATH" >&2
+  exit 1
+fi
+
+# Create log directory
+# LOGS_DIR="${PARENT_DIR}/logs"
+# mkdir -p "$LOGS_DIR"
+
+# LOGGING_FILE="${LOGS_DIR}/demo_journal.log"
+# echo "Log file: $LOGGING_FILE"
+
+# Source the logger module
+source "$LOGGER_PATH"
+
+# Function to check if logger command is available - NOT USED
+check_logger_availability() {
+  if command -v logger &>/dev/null; then
+    echo "✓ 'logger' command is available for journal logging"
+    LOGGER_AVAILABLE=true
+  else
+    echo "✗ 'logger' command is not available. Journal logging features will be skipped."
+    LOGGER_AVAILABLE=false
+  fi
+}
+# Check if logger command is available
+# check_logger_availability
+
+# if [[ "$LOGGER_AVAILABLE" == true ]]; then
+#   # Initialize with journal logging enabled
+#   echo "========== Initializing with journal logging =========="
+#   init_logger --log "${LOGGING_FILE}" --journal || {
+#     echo "Failed to initialize logger" >&2
+#     exit 1
+#   }
+
+# Specify the level of logging you want
+# From MOST verbose to QUIET
+# DEBUG|INFO|NOTICE\WARN|ERROR|CRITICAL|ALERT|EMERGENCY
+# Special levels: --verbose (=DEBUG) and QUIET
+init_logger --level NOTICE --verbose || {
+    echo "Failed to initialize logger" >&2
+    exit 1
+  }
 
 # Check for root permissions
 check_for_root() {
   if [[ $EUID -ne 0 ]]; then fail "This script must be run as root."; fi
 }
 
-# Helper function to handle execution vs printing
+# Helper function to handle running a command vs printing
 run() {
   if $DRY_RUN; then
-    echo "[DRY-RUN]: Executing: $*" >&2
+    log_notice "[DRY-RUN]: Executing: $*"
   else
     "$@"
   fi
 }
 
-fail (){ echo "[ERROR]: $1" >&2 && exit 1; }
-
-warn (){
-  if [[ $QUIET == "false" ]]; then
-    echo "[WARNING]: $1" >&2
-  fi
-}
-
-info (){
-  if [[ $QUIET == "false" ]]; then
-    echo "[INFO]   : $1" >&2
-  fi
+# Function to log critical message and abort the script
+fail (){
+  log_critical "$*"
+  exit 1
 }
 
 # Function to show extended usage information
-# Runs when timeshift-btrbk-bridge is called with -h as an option
-# Exits 0
+# Runs when timeshift-btrbk-bridge is called with command 'help'
 show_usage() {
 	cat <<HERE;
 timeshift-btrbk-bridge $VERSION
-Usage: timeshift-btrbk-bridge [-hn] [-c cfgfile] [-l loglevel] [-p ON|OFF] [-T throttle]
+Usage: timeshift-btrbk-bridge [-n] [-c cfgfile] [-l loglevel] [-p ON|OFF] [-T throttle]
 
 timeshift-btrbk-bridge creates read-only clones from timeshift read-write
 snapshots and renames them for btrbk compatibility.
@@ -62,7 +102,7 @@ See the GNU General Public License for details.
 
 Options:
     -c file          - Specify alternate btrbk config file (-c /path/to/file).
-    -l loglevel      - Specify loglevel for btrbk.
+    -l loglevel      - Specify loglevel **for btrbk**.
                        Must be one of error|warn|info|debug|trace.
     -n               - Dry run. Do not modify anything. Just show what would be
                        done when running a command.
@@ -120,7 +160,7 @@ parse_input() {
           if [[ $OPTARG =~ error|warn|info|debug|trace ]]; then
             LOGLEVEL=$OPTARG
             BTRBK_OPTIONS+=( "--loglevel=$LOGLEVEL" )
-            INFO_MSGS+=( "--- LOG LEVEL is set to $LOGLEVEL ---" )
+            INFO_MSGS+=( "--- BTRBK LOG LEVEL is set to $LOGLEVEL ---" )
           else
             WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
           fi
@@ -158,10 +198,10 @@ parse_input() {
     # Do it here, after all options have been parsed (including QUIET).
     # So that we can honour the QUIET option, if set.
     for msg in "${WARNING_MSGS[@]}"; do
-      warn "$msg"
+      log_warn "$msg"
     done
     for msg in "${INFO_MSGS[@]}"; do
-      info "$msg"
+      log_info "$msg"
     done
 
     # 2. Handle Command
@@ -172,7 +212,7 @@ parse_input() {
       COMMAND=$1
       shift 1
       if [[ $# -gt 0 ]]; then
-        warn "Ignore excess arguments $*."
+        log_warn "Ignore excess arguments $*."
       fi
     fi
 
@@ -193,12 +233,12 @@ with_retries() {
   while true; do
     if ! run "$@"; then
       if (( count < max)); then
-        warn "Command $* failed. Attempt $count/$max"
+        log_warn "Command $* failed. Attempt $count/$max"
         ((count++))
         sleep $delay
       else
         typeset msg="Command $* has failed after $count attempts."
-        if $fatal; then fail "$msg"; else warn "$msg"; fi
+        if $fatal; then fail "$msg"; else log_warn "$msg"; fi
       fi
       else
         break
@@ -221,7 +261,7 @@ automount_by_label () {
   if [[ -n "$MOUNTPOINT" ]]; then
 
     if [[ ! -d $MOUNTPOINT ]]; then
-      mkdir -p "$MOUNTPOINT" 2>/dev/null || fail "failed to create mountpoint $MOUNTPOINT"
+      mkdir -p "$MOUNTPOINT" 2>/dev/null || { fail "failed to create mountpoint $MOUNTPOINT"; }
     fi
 
     if ! mountpoint -q "$MOUNTPOINT"; then
@@ -268,20 +308,20 @@ process_snapshot() {
 
         # 1. Check if source subvolume exists (e.g., does @home exist in this snapshot?)
         if [[ ! -d "$src_subvol" ]]; then
-            warn "Subvolume $subvol not found in $timeshift_snapshot_name, skipping."
+            log_warn "Subvolume $subvol not found in $timeshift_snapshot_name, skipping."
             continue
         fi
 
         # 2. Check if snapshot is older than the latest archived snapshot for this subvolume
-        warn "Comparing ${subvol}.${btrbk_snapshot_name} to ${LATEST_SNAPSHOTS[$subvol]}"
+        log_debug "Comparing ${subvol}.${btrbk_snapshot_name} to ${LATEST_SNAPSHOTS[$subvol]}"
         if [[ "${subvol}.${btrbk_snapshot_name}" < "${LATEST_SNAPSHOTS[$subvol]}" ]]; then
-          warn "Snapshot $btrbk_snapshot_name is older than the latest archived snapshot for this subvolume. Skipping..."
+          log_debug "Snapshot $btrbk_snapshot_name is older than the latest archived snapshot for this subvolume. Skipping..."
           continue
         fi
 
         # 3. Check if the destination already exists in the sink
         if [[ ! -d "$dest_subvol" ]]; then
-            info "Creating read-only snapshot ${subvol}.${btrbk_snapshot_name} in the btrbk sink."
+            log_info "Creating read-only snapshot ${subvol}.${btrbk_snapshot_name} in the btrbk sink."
 
             # Use absolute paths for both source and destination
             run btrfs subvolume snapshot -r "$src_subvol" "$dest_subvol"
@@ -291,7 +331,7 @@ process_snapshot() {
                 fail "Failed to create read-only snapshot for $src_subvol (return code $rc)"
             fi
         else
-            info "Snapshot ${subvol}.${btrbk_snapshot_name} already exists in btrbk sink."
+            log_info "Snapshot ${subvol}.${btrbk_snapshot_name} already exists in btrbk sink."
         fi
     done
 }
@@ -314,6 +354,7 @@ relinquish_timeshift_lock(){
 
 # exit handler
 cleanup () {
+  set +e
   typeset exit_code=$?
   typeset mp
   trap - EXIT
@@ -323,8 +364,10 @@ cleanup () {
     if grep -F "$$;" $TIMESHIFT_LOCK; then
       rm $TIMESHIFT_LOCK
       rc=$?
-      info "Error removing the timeshift lock (return code $rc)."
+      log_info "Error removing the timeshift lock (return code $rc)."
+      set +e
       send_desktop_notification "critical" "timeshift btrbk bridge" "Could not remove the timeshift lock.. All timeshift commands will fail until the lock (file /run/timeshift/lock/timeshift) is removed. Please investigate."
+      set -e
     fi
   fi
 
@@ -332,11 +375,11 @@ cleanup () {
   for mp in "${mounted_by_this_script[@]}"; do
     umount "$mp"
     rc=$?
-    if [[ 0 -ne $rc ]]; then fail "umount $mp returned $rc."; fi
+    if [[ 0 -ne $rc ]]; then log_critical "umount $mp returned $rc."; fi
   done
 
   if [[ $exit_code -gt 0 ]] && [[ -n "$PHASE" ]]; then
-    info "A command in phase $PHASE returned $exit_code."
+    log_critical "A command in phase $PHASE returned $exit_code."
     send_desktop_notification "critical" "timeshift btrbk bridge" "timeshift-btrbk-bridge returned $exit_code in phase $PHASE. Please investigate."
   fi
 
@@ -354,7 +397,7 @@ send_desktop_notification() {
 
     # have loginctl?
     if ! have_command loginctl; then
-      warn "${whereami}: command loginctl not found"
+      log_warn "${whereami}: command loginctl not found"
       return 1
     fi
 
@@ -364,7 +407,7 @@ send_desktop_notification() {
     loginctl --no-legend list-users 2>/dev/null | mapfile -t LOGINCTL_USERS
     rc=${PIPESTATUS[0]}
     [[ $rc -eq 0 ]] || {
-      warn "${whereami}: loginctl rc=$rc"
+      log_warn "${whereami}: loginctl rc=$rc"
       return $rc
     }
     typeset item
@@ -377,7 +420,7 @@ send_desktop_notification() {
         nr_gui_user="${BASH_REMATCH[2]}"
         break
       else
-        warn "${whereami}: ($item) does not match pattern"
+        log_warn "${whereami}: ($item) does not match pattern"
       fi
     done
   }
@@ -390,7 +433,7 @@ send_desktop_notification() {
 
     # have w?
     if ! have_command w >/dev/null; then
-      warn "${whereami}: command w not found"
+      log_warn "${whereami}: command w not found"
       return 1
     fi
 
@@ -400,7 +443,7 @@ send_desktop_notification() {
     w --no-header 2>/dev/null | mapfile -t W
     rc=${PIPESTATUS[0]}
     [[ $rc -eq 0 ]] || {
-      warn "${whereami}: command w failed rc=$rc"
+      log_warn "${whereami}: command w failed rc=$rc"
       return $rc
     }
     typeset item
@@ -411,7 +454,7 @@ send_desktop_notification() {
         [[ "$nr_gui_user" == root ]] && continue
         break
       else
-        warn "${whereami}: ($item) does not match pattern"
+        log_warn "${whereami}: ($item) does not match pattern"
       fi
     done
     nr_gui_user_id=""
@@ -429,7 +472,7 @@ send_desktop_notification() {
 
   # have notify-send?
   if ! have_command notify-send; then
-    fail "${whereami}: command notify-send not found"
+    log_warn "${whereami}: command notify-send not found"
     return 1
   fi
 
@@ -444,7 +487,7 @@ send_desktop_notification() {
 
   # still no gui_user? give up
   if [[ -z "${gui_user}" ]]; then
-    warn "${whereami}: failed to get gui_user"
+    log_warn "${whereami}: failed to get gui_user"
     return 1
   fi
 
@@ -455,7 +498,7 @@ send_desktop_notification() {
        notify-send -u "$urgency" -i "timeshift" "$summary" "$body" \
        -t 10000
   rc=$?
-  [[ "$rc" -eq 0 ]] || warn "$whereami: notify-send rc=$rc"
+  [[ "$rc" -eq 0 ]] || log_warn "$whereami: notify-send rc=$rc"
   return $rc
 
 } # End of send_desktop_notification
@@ -463,6 +506,7 @@ send_desktop_notification() {
 do_clone() {
   # 1. Selection phase
   PHASE="Clone"
+  log_notice "Start $PHASE"
 
   # NOTE: Acquire the timeshift lock
   # Prevent timeshift to create/delete snapshots while we are processing them.
@@ -480,13 +524,14 @@ do_clone() {
 
   # 2. Fill btrbk sink
   PHASE="Fill btrbk sink"
+  log_notice "Start $PHASE"
   # Throttle the transfer to btrbk sink. Limit to 5 snapshots per run.
   typeset -i count=0            # start from zero, as does timeshift
   # Process snapshots
   # NOTE: take THROTTLE into account
-  info "Processing snapshots"
+  log_info "Processing snapshots"
   for snapshot in "${timeshift_snapshots[@]:0:${THROTTLE}}"; do
-    info "snapshot #$count - $snapshot ..."
+    log_info "snapshot #$count - $snapshot ..."
     process_snapshot "$snapshot"
     # Ignore return code 1 (snapshot does not exist any more)
     # Fatal errors while processing a snapshot are caught and stop the script.
@@ -501,6 +546,7 @@ do_clone() {
 do_btrbk() {
   # 3. Run btrbk send / receive
   PHASE="Btrbk send/receive"
+  log_notice "Start $PHASE"
   # We mount BTRBK_ARCHIVE here for test purposes.
   # In production this script will run automatically using a systemd timer, and
   # BTRBK_ARCHIVE will be mounted using a mount unit.
@@ -518,7 +564,7 @@ do_btrbk() {
   # btrbk return code 10 means "Completed with warnings"
   # (often due to stray subvolumes or skipped snapshots)
   if [[ $rc -eq 10 ]]; then
-    warn "btrbk completed with warnings (RC 10). This is likely due to re-introduced snapshots."
+    log_error "btrbk completed with warnings (RC 10). This is likely due to re-introduced snapshots."
   elif [[ $rc -gt 0 ]]; then
     fail "btrbk returned a fatal error: $rc."
   fi
@@ -526,7 +572,6 @@ do_btrbk() {
 
 # Function to get the latest snapshots on BTRBK_ARCHIVE for subvolumes @ and @home
 get_latest_snapshots () {
-  set -v
   # Capture output of 'btrbk --format=raw list latest'
   mapfile -t btrbk_list_latest < <(btrbk --format=raw list latest)
   typeset format type source_url source_host source_port source_subvolume snapshot_subvolume \
@@ -536,16 +581,15 @@ get_latest_snapshots () {
 
   for entry in "${btrbk_list_latest[@]}"; do
     eval "$entry"
-    printf '%s\n' "$snapshot_name"
-    printf '%s\n' "$snapshot_subvolume"
+    # printf '%s\n' "$snapshot_name"
+    # printf '%s\n' "$snapshot_subvolume"
     key="$snapshot_name"
     value="$(basename "$snapshot_subvolume")"
-    printf '%s\n' "key = $key"
-    printf '%s\n' "value = $value"
-    printf '%s\n' "Latest archived snapshot for $key is $value"
+    # printf '%s\n' "key = $key"
+    # printf '%s\n' "value = $value"
+    log_notice "Latest archived snapshot for $key is $value"
     LATEST_SNAPSHOTS["$key"]="$value"
   done
-  set +v
 }
 
 # ----- start Main -----
@@ -554,7 +598,7 @@ check_for_root
 
 parse_input "$@"
 
-info "Running $0 $*"
+log_notice "Running $0 $*"
 
 # Mount BTRFS_ROOT
 # and keep track of mountpoints mounted by this script
@@ -597,7 +641,7 @@ case $COMMAND in
     ;;
   version )
     # show version
-    info "timeshift-btrbk-bridge version=$VERSION"
+    log_info "timeshift-btrbk-bridge version=$VERSION"
     btrbk --version
     exit 0
     ;;
