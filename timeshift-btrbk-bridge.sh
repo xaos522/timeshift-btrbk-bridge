@@ -1,70 +1,28 @@
 #!/usr/bin/env bash
 
 # Configuration
-VERSION="v0.1.1"
-SYSTEM_DEVICE_LABEL="BTRFS_ROOT"           # Label of root Btrfs filesystem
-BTRFS_ROOT_MOUNTPOINT="/mnt/btrfs_root"    # Mount point for root volume
-TIMESHIFT_LOCK="/var/lock/timeshift/lock"  # Timeshift lock file
-TIMESHIFT_SNAPSHOTS_DIR="${BTRFS_ROOT_MOUNTPOINT}/timeshift-btrfs/snapshots"
-                                           # Path ti timeshift snapshots
-BTRBK_SINK="${BTRFS_ROOT_MOUNTPOINT}/btrbk/snapshots"
-                                           # Path to btrbk snapshots (sink)
-BTRBK_ARCHIVE_MOUNTPOINT="/mnt/btrbk_archive"
-                                           # Path to btrbk archive
-BTRBK_CONFIG_FILE=""                       # Path to the btrbk config file
-typeset -a TARGET_SUBVOLUMES=("@" "@home") # Btrfs subvolumes to process
-typeset -a BTRBK_OPTIONS=()                # Array of btrbk options
-
+typeset -r VERSION="v0.1.1"
+typeset -r TAG="timeshift-btrbk-bridge"               # Script TAG
+typeset -r SYSTEM_DEVICE_LABEL="BTRFS_ROOT"           # Label of root Btrfs filesystem
+typeset -r BTRFS_ROOT_MOUNTPOINT="/mnt/btrfs_root"    # Mount point for root volume
+typeset -r TIMESHIFT_LOCK="/var/lock/timeshift/lock"  # Timeshift lock file
+# Path to timeshift snapshots
+typeset -r TIMESHIFT_SNAPSHOTS_DIR="${BTRFS_ROOT_MOUNTPOINT}/timeshift-btrfs/snapshots"
+# Path to btrbk snapshots (= btrbk sink)
+typeset -r BTRBK_SINK="${BTRFS_ROOT_MOUNTPOINT}/btrbk/snapshots"
+# Mount point for USB backup drive containin gbtrbk archive
+typeset -r BTRBK_ARCHIVE_MOUNTPOINT="/mnt/btrbk_archive"
+BTRBK_CONFIG_FILE=""                                  # Path to the btrbk config file
+typeset -ar TARGET_SUBVOLUMES=("@" "@home")           # Btrfs subvolumes to process
+typeset -a BTRBK_OPTIONS=()                           # Indexed array of btrbk options
 # Path to logger module
-LOGGER_PATH="/home/me/.local/lib/bash-logger/logging.sh"
-
-set -euo pipefail
-
-# Check if logger exists
-if [[ ! -f "$LOGGER_PATH" ]]; then
-  echo "Error: Logger module not found at $LOGGER_PATH" >&2
-  exit 1
-fi
-
-# Create log directory
-# LOGS_DIR="${PARENT_DIR}/logs"
-# mkdir -p "$LOGS_DIR"
-
-# LOGGING_FILE="${LOGS_DIR}/demo_journal.log"
-# echo "Log file: $LOGGING_FILE"
-
-# Source the logger module
-source "$LOGGER_PATH"
-
-# Function to check if logger command is available - NOT USED
-check_logger_availability() {
-  if command -v logger &>/dev/null; then
-    echo "✓ 'logger' command is available for journal logging"
-    LOGGER_AVAILABLE=true
-  else
-    echo "✗ 'logger' command is not available. Journal logging features will be skipped."
-    LOGGER_AVAILABLE=false
-  fi
-}
-# Check if logger command is available
-# check_logger_availability
-
-# if [[ "$LOGGER_AVAILABLE" == true ]]; then
-#   # Initialize with journal logging enabled
-#   echo "========== Initializing with journal logging =========="
-#   init_logger --log "${LOGGING_FILE}" --journal || {
-#     echo "Failed to initialize logger" >&2
-#     exit 1
-#   }
-
-# Specify the level of logging you want
-# From MOST verbose to QUIET
-# DEBUG|INFO|NOTICE\WARN|ERROR|CRITICAL|ALERT|EMERGENCY
-# Special levels: --verbose (=DEBUG) and QUIET
-init_logger --level NOTICE --verbose || {
-    echo "Failed to initialize logger" >&2
-    exit 1
-  }
+typeset -r LOGGER_PATH="/usr/local/lib/bash-logger/logging.sh"
+# Logging config file
+typeset -r LOGGER_CONFIG="/usr/local/etc/${TAG}/logging.conf"
+# Timeshift-btrbk-bridge log file directory
+typeset -r LOGGING_DIR="/var/log/${TAG}"
+# Timeshift-btrbk-bridge log file
+typeset -r LOGGING_FILE="$LOGGING_DIR/${TAG}.log"
 
 # Check for root permissions
 check_for_root() {
@@ -90,13 +48,13 @@ fail (){
 # Runs when timeshift-btrbk-bridge is called with command 'help'
 show_usage() {
 	cat <<HERE;
-timeshift-btrbk-bridge $VERSION
-Usage: timeshift-btrbk-bridge [-n] [-c cfgfile] [-l loglevel] [-p ON|OFF] [-T throttle]
+"$TAG $VERSION"
+Usage: "$TAG" [-n] [-c cfgfile] [-l loglevel] [-p ON|OFF] [-T throttle] command
 
-timeshift-btrbk-bridge creates read-only clones from timeshift read-write
+$TAG creates read-only clones from timeshift read-write
 snapshots and renames them for btrbk compatibility.
 
-timeshift-btrbk-bridge comes with ABSOLUTELY NO WARRANTY.  This is free software,
+$TAG comes with ABSOLUTELY NO WARRANTY.  This is free software,
 and you are welcome to redistribute it under certain conditions.
 See the GNU General Public License for details.
 
@@ -115,14 +73,14 @@ Options:
     -t throttle      - Specify the maximum nomber of timeshift snapshots to process
                        in one run.
                        For testing purposes, and for catching up with timeshift when
-                       starting to use timeshift-btrbk-bridge, and not getting overwhelmed
+                       starting to use ${TAG}, and not getting overwhelmed
                        with a mass of send / receve snapshots being launched by btrbk.
 
 Commands:
     clone            - Only clone timeshift snapshots. Do not run btrbk.
     btrbk            - Do not clone timeshift snapshots. Only run btrbk.
     run              - Run both clone and btrbk.
-    version          - Show the version number for timeshift-btrbk-bridge and btrbk.
+    version          - Show version for ${TAG} and btrbk.
     help             - Show this help message.
 HERE
 
@@ -592,9 +550,52 @@ get_latest_snapshots () {
   done
 }
 
+# Function to check if logger command is available
+check_logger_availability() {
+  if command -v logger &>/dev/null; then
+    echo "✓ 'logger' command is available for journal logging"
+    LOGGER_AVAILABLE=true
+  else
+    echo "✗ 'logger' command is not available. Journal logging features will be skipped."
+    LOGGER_AVAILABLE=false
+  fi
+}
+
+# Configure logging
+configure_logging () {
+  # Check if logger exists
+  if [[ ! -f "$LOGGER_PATH" ]]; then
+    echo "Error: Logger module not found at $LOGGER_PATH" >&2
+    exit 1
+  fi
+
+  # Create log directory
+  mkdir -p "$LOGGING_DIR"
+
+  echo "Log file: $LOGGING_FILE"
+
+  # Source the logger module
+  echo "Sourcing logger from: $LOGGER_PATH"
+  # shellcheck source=/dev/null
+  source "$LOGGER_PATH"
+  # Check if logger command is available
+  check_logger_availability
+
+  # Initialize logger usingLOGGING_CONFIG
+  echo "========== Initializing logger using config file =========="
+  init_logger --config "${LOGGER_CONFIG}" || {
+    echo "Failed to initialize logger" >&2
+    exit 1
+  }
+}
+
 # ----- start Main -----
 
+set -euo pipefail
+
 check_for_root
+
+configure_logging
 
 parse_input "$@"
 
