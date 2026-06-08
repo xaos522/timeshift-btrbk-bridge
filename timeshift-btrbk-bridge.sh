@@ -3,30 +3,35 @@
 # Configuration
 typeset -r VERSION="v0.1.1"
 typeset -r TAG="timeshift-btrbk-bridge"               # Script TAG
-typeset -r SYSTEM_DEVICE_LABEL="BTRFS_ROOT"           # Label of root Btrfs filesystem
+typeset -r ROOT_FILESYSTEM_LABEL="BTRFS_ROOT"         # Label of root Btrfs filesystem
 typeset -r BTRFS_ROOT_MOUNTPOINT="/mnt/btrfs_root"    # Mount point for root volume
 typeset -r TIMESHIFT_LOCK="/var/lock/timeshift/lock"  # Timeshift lock file
 # Path to timeshift snapshots
 typeset -r TIMESHIFT_SNAPSHOTS_DIR="${BTRFS_ROOT_MOUNTPOINT}/timeshift-btrfs/snapshots"
 # Path to btrbk snapshots (= btrbk sink)
 typeset -r BTRBK_SINK="${BTRFS_ROOT_MOUNTPOINT}/btrbk/snapshots"
-# Mount point for USB backup drive containin gbtrbk archive
+typeset -r ARCHIVE_FILESYSTEM_LABEL="BTRBK_ARCHIVE"   # Label of btrbk archive filesystem
+
+# Mount point for USB backup drive containing btrbk archive
 typeset -r BTRBK_ARCHIVE_MOUNTPOINT="/mnt/btrbk_archive"
 BTRBK_CONFIG_FILE=""                                  # Path to the btrbk config file
 typeset -ar TARGET_SUBVOLUMES=("@" "@home")           # Btrfs subvolumes to process
 typeset -a BTRBK_OPTIONS=()                           # Indexed array of btrbk options
 # Path to logger module
-typeset -r LOGGER_PATH="/usr/local/lib/bash-logger/logging.sh"
+typeset -r LOGGING_MODULE_PATH="/usr/local/lib/bash-logger/logging.sh"
 # Logging config file
-typeset -r LOGGER_CONFIG="/usr/local/etc/${TAG}/logging.conf"
-# Timeshift-btrbk-bridge log file directory
-typeset -r LOGGING_DIR="/var/log/${TAG}"
+typeset -r LOGGING_CONFIG="/usr/local/etc/${TAG}/logging.conf"
+# Timeshift-btrbk-bridge log file directory - set in LOGGING_CONFIG
+# typeset -r LOGGING_DIR="/var/log/${TAG}"
 # Timeshift-btrbk-bridge log file
-typeset -r LOGGING_FILE="$LOGGING_DIR/${TAG}.log"
+# typeset -r LOGGING_FILE="$LOGGING_DIR/${TAG}.log"
 
 # Check for root permissions
 check_for_root() {
-  if [[ $EUID -ne 0 ]]; then fail "This script must be run as root."; fi
+  if [[ $EUID -ne 0 ]]; then
+    echo "This script must be run as root." >&2
+    exit 1
+  fi
 }
 
 # Helper function to handle running a command vs printing
@@ -41,6 +46,7 @@ run() {
 # Function to log critical message and abort the script
 fail (){
   log_critical "$*"
+  log_critical "Abort."
   exit 1
 }
 
@@ -48,7 +54,8 @@ fail (){
 # Runs when timeshift-btrbk-bridge is called with command 'help'
 show_usage() {
 	cat <<HERE;
-"$TAG $VERSION"
+"$TAG version $VERSION"
+
 Usage: "$TAG" [-n] [-c cfgfile] [-l loglevel] [-p ON|OFF] [-T throttle] command
 
 $TAG creates read-only clones from timeshift read-write
@@ -84,10 +91,35 @@ Commands:
     help             - Show this help message.
 HERE
 
-	exit 0
 }
 
-parse_input() {
+# Parse arguments for commands that do not require elevated privileges to run
+parse_arguments_early() {
+  if (( $# > 0 )); then
+    typeset option
+    for option in "$@"; do
+      case "$option" in
+        help )
+          show_usage
+          exit 0
+          ;;
+        version )
+          echo "timeshift-btrbk-bridge version $VERSION"
+          btrbk --version
+          exit 0
+          ;;
+      esac
+    done
+  else
+    echo "Missing required argument"
+    show_usage
+    exit 1
+  fi
+}
+
+# Parse arguments that require elevated privileges to run
+# Called AFTER check_for_root and configure_logging
+parse_arguments() {
   typeset -g    DRY_RUN=false
   typeset -i -g THROTTLE=1000         # no throttling by default
   typeset -g    PRESERVE="ON"         # retention policy is ON by default
@@ -97,87 +129,90 @@ parse_input() {
   typeset -a    INFO_MSGS=()          # Collect INFO messages
   typeset -a    WARNING_MSGS=()       # Collect WARNING messages
 
-  if (( $# > 0 )); then               # If options provided then
-    # 1. Handle Options
-    while getopts ":c:l:np:qt:" opt; do # Go through the options
-      case $opt in
-        # Keep the DRY-RUN option first, to list it as first when set.
-        n )
-          DRY_RUN=true
-          WARNING_MSGS+=( "--- DRY RUN MODE ACTIVE (No changes will be made) ---" )
-          ;;
-        c )
-          if [[ ! -r $OPTARG ]]; then
-            fail "btrbk configuration file $OPTARG is not readable"
-          else
-            BTRBK_CONFIG_FILE=$OPTARG
-            BTRBK_OPTIONS+=( "-c $OPTARG")
+  # NOTE:
+  # One or more arguments is guaranteed after the call to parse_arguments_early
+  # 1. Handle Options
+  while getopts ":c:l:np:qt:" opt; do # Go through the options
+    case $opt in
+      # Keep the DRY-RUN option first, to list it as first when set.
+      n )
+        DRY_RUN=true
+        WARNING_MSGS+=( "--- DRY RUN MODE ACTIVE (No changes will be made) ---" )
+        ;;
+      c )
+        if [[ ! -r $OPTARG ]]; then
+          fail "btrbk configuration file $OPTARG is not readable"
+        else
+          BTRBK_CONFIG_FILE=$OPTARG
+          BTRBK_OPTIONS+=( "-c $OPTARG")
+        fi
+        ;;
+      l )
+        # NOTE:
+        # LOGLEVEL is the log level for the btrbk invocation.
+        # General log levels are set in configure_logging.
+        if [[ $OPTARG =~ error|warn|info|debug|trace ]]; then
+          LOGLEVEL=$OPTARG
+          BTRBK_OPTIONS+=( "--loglevel=$LOGLEVEL" )
+          INFO_MSGS+=( "--- BTRBK LOG LEVEL is set to $LOGLEVEL ---" )
+        else
+          WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
+        fi
+        ;;
+      p )
+        if [[ $OPTARG =~ ON|OFF ]]; then
+          PRESERVE=$OPTARG
+          if [[ $PRESERVE == ON ]]; then
+            INFO_MSGS+=( "--- PRESERVE MODE is $PRESERVE ---")
+            BTRBK_OPTIONS+=( "-p")
           fi
-          ;;
-        l )
-          if [[ $OPTARG =~ error|warn|info|debug|trace ]]; then
-            LOGLEVEL=$OPTARG
-            BTRBK_OPTIONS+=( "--loglevel=$LOGLEVEL" )
-            INFO_MSGS+=( "--- BTRBK LOG LEVEL is set to $LOGLEVEL ---" )
-          else
-            WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
-          fi
-          ;;
-       p )
-         if [[ $OPTARG =~ ON|OFF ]]; then
-           PRESERVE=$OPTARG
-           if [[ $PRESERVE == ON ]]; then
-             INFO_MSGS+=( "--- PRESERVE MODE is $PRESERVE ---")
-             BTRBK_OPTIONS+=( "-p")
-           fi
-         else
-           WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
-         fi
-         ;;
-       q )
-         QUIET=true
-         ;;
-       t )
-          if [[ $OPTARG =~ [1-9][0-9]* ]]; then
-            THROTTLE=$OPTARG
-            INFO_MSGS+=( "--- THROTTLE is set to $THROTTLE ---" )
-          else
-            WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
-          fi
-          ;;
-        ? ) # Invalid option
-          fail "invalid option: -${OPTARG}"
-          ;;
+        else
+          WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
+        fi
+        ;;
+      q )
+        QUIET=true
+        ;;
+      t )
+        if [[ $OPTARG =~ [1-9][0-9]* ]]; then
+          THROTTLE=$OPTARG
+          INFO_MSGS+=( "--- THROTTLE is set to $THROTTLE ---" )
+        else
+          WARNING_MSGS+=( "invalid option -$opt argument $OPTARG" )
+        fi
+        ;;
+      ? ) # Invalid option
+        fail "invalid option: -${OPTARG}"
+        ;;
 
-      esac
-    done
+    esac
+  done
 
-    # Show WARNING and INFO messages.
-    # Do it here, after all options have been parsed (including QUIET).
-    # So that we can honour the QUIET option, if set.
-    for msg in "${WARNING_MSGS[@]}"; do
-      log_warn "$msg"
-    done
-    for msg in "${INFO_MSGS[@]}"; do
-      log_info "$msg"
-    done
+  # Show WARNING and INFO messages.
+  # Do it here, after all options have been parsed (including QUIET).
+  # So that we can honour the QUIET option, if set.
+  for msg in "${WARNING_MSGS[@]}"; do
+    log_warn "$msg"
+  done
+  for msg in "${INFO_MSGS[@]}"; do
+    log_info "$msg"
+  done
 
-    # 2. Handle Command
-    shift $((OPTIND -1))
-    if [[ $# -eq 0 ]]; then
-      fail "Must specify one command (clone|btrbk|run|version|help)."
-    else
-      COMMAND=$1
-      shift 1
-      if [[ $# -gt 0 ]]; then
-        log_warn "Ignore excess arguments $*."
-      fi
+  # 2. Handle Command
+  shift $((OPTIND -1))
+  if [[ $# -eq 0 ]]; then
+    fail "Must specify one command (clone|btrbk|run|version|help)."
+  else
+    COMMAND=$1
+    shift 1
+    if [[ $# -gt 0 ]]; then
+      log_warn "Ignore excess arguments $*."
     fi
+  fi
 
-    # 3. Early Help Exit
-    if [[ $COMMAND == "help" ]]; then
-      show_usage
-    fi
+  # 3. Early Help Exit
+  if [[ $COMMAND == "help" ]]; then
+    show_usage
   fi
 }
 
@@ -204,10 +239,10 @@ with_retries() {
   done
 }
 
-# automount device with given label
+# Mount device with given label
 # NOTE: Presumes filesystem is declared in /etc/fstab with LABEL=
 #       Mount with options and mountpoint declared in /etc/fstab
-automount_by_label () {
+mount_by_label () {
   typeset LABEL=$1
   typeset MOUNTPOINT
 
@@ -222,10 +257,13 @@ automount_by_label () {
       mkdir -p "$MOUNTPOINT" 2>/dev/null || { fail "failed to create mountpoint $MOUNTPOINT"; }
     fi
 
+    # NOTE: issue
+    # mount LABEL=BTRBK_ARCHIVE returns 0 when the USB device is not mounted
+    # because the entry in /etc/fstab had 'nofail' in the mount options.
+    # removing 'nofail' solved the issue.
     if ! mountpoint -q "$MOUNTPOINT"; then
-
       # Attempt the mount
-      mount LABEL="$LABEL"
+      mount LABEL="$LABEL" &>/dev/null
       rc=$?
 
       if [[ $rc -gt 0 ]]; then
@@ -266,14 +304,14 @@ process_snapshot() {
 
         # 1. Check if source subvolume exists (e.g., does @home exist in this snapshot?)
         if [[ ! -d "$src_subvol" ]]; then
-            log_warn "Subvolume $subvol not found in $timeshift_snapshot_name, skipping."
+            log_warn "Subvolume $subvol not present in $timeshift_snapshot_name, skipping."
             continue
         fi
 
         # 2. Check if snapshot is older than the latest archived snapshot for this subvolume
         log_debug "Comparing ${subvol}.${btrbk_snapshot_name} to ${LATEST_SNAPSHOTS[$subvol]}"
-        if [[ "${subvol}.${btrbk_snapshot_name}" < "${LATEST_SNAPSHOTS[$subvol]}" ]]; then
-          log_debug "Snapshot $btrbk_snapshot_name is older than the latest archived snapshot for this subvolume. Skipping..."
+        if ! [[ "${subvol}.${btrbk_snapshot_name}" > "${LATEST_SNAPSHOTS[$subvol]}" ]]; then
+          log_debug "Snapshot $btrbk_snapshot_name has already been archived. Skipping..."
           continue
         fi
 
@@ -331,7 +369,7 @@ cleanup () {
 
   # unmount filesystems mounted by this script
   for mp in "${mounted_by_this_script[@]}"; do
-    umount "$mp"
+    umount "$mp" &>/dev/null
     rc=$?
     if [[ 0 -ne $rc ]]; then log_critical "umount $mp returned $rc."; fi
   done
@@ -461,54 +499,71 @@ send_desktop_notification() {
 
 } # End of send_desktop_notification
 
-do_clone() {
-  # 1. Selection phase
-  PHASE="Clone"
-  log_notice "Start $PHASE"
+clone_timeshift_snapshots() {
+  # NOTE: Get latest archived snapshot per subvolume.
+  # This REQUIRES the USB drive containing btrbk archive to be mounted.
+  # Used to decide which timeshift snapshots we want to select and process:
+  # Only snapshots younger than the latest snapshot are processed,
+  # other snapshots have already been archived and can be skipped.
+  # 1. Get latest archived snapshot per subvolume
+  PHASE="Get latest archived snapshot per subvolume"
+  log_notice "Start ${PHASE,,}"
+
+  if ! mountpoint -q "$BTRBK_ARCHIVE_MOUNTPOINT"; then
+    fail "Filesystem with label $ARCHIVE_FILESYSTEM_LABEL is not mounted."
+  fi
+
+  typeset -A LATEST_SNAPSHOTS
+  get_latest_snapshots
+
+  # 2. Find all timeshift snapshots
+  PHASE="Find all timeshift snapshots"
+  log_notice "Start ${PHASE,,}"
 
   # NOTE: Acquire the timeshift lock
   # Prevent timeshift to create/delete snapshots while we are processing them.
   with_retries 3 2 true acquire_timeshift_lock
+
   # We hold the timeshift lock
   typeset -a timeshift_snapshots
   # Enable nullglob so it returns an empty array if no snapshots exist
   shopt -s nullglob
   # Populate array directly with absolute paths
-  timeshift_snapshots=( "$TIMESHIFT_SNAPSHOTS_DIR"/*/ )
+  timeshift_snapshots=( "$TIMESHIFT_SNAPSHOTS_DIR"/* )
   # Remove trailing slash
-  timeshift_snapshots=( "${timeshift_snapshots[@]%/}" )
+  # timeshift_snapshots=( "${timeshift_snapshots[@]%/}" )
   shopt -u nullglob
   # printf '%s\n' "${timeshift_snapshots[@]}"
 
-  # 2. Fill btrbk sink
-  PHASE="Fill btrbk sink"
-  log_notice "Start $PHASE"
-  # Throttle the transfer to btrbk sink. Limit to 5 snapshots per run.
+  # 3. Select and process snapshots
+  PHASE="Clone selected timeshift snapshots into the btrbk sink"
+  log_notice "Start ${PHASE,,}"
+
   typeset -i count=0            # start from zero, as does timeshift
   # Process snapshots
-  # NOTE: take THROTTLE into account
   log_info "Processing snapshots"
+  # NOTE: take THROTTLE into account
+  # Limit number of processed snapshots to configured snapshots per run.
   for snapshot in "${timeshift_snapshots[@]:0:${THROTTLE}}"; do
     log_info "snapshot #$count - $snapshot ..."
     process_snapshot "$snapshot"
-    # Ignore return code 1 (snapshot does not exist any more)
-    # Fatal errors while processing a snapshot are caught and stop the script.
+    # ?? Ignore return code 1 (snapshot does not exist any more)
     (( ++count ))
   done
-  unset count
 
   # Relinquish the timeshift lock.
   run relinquish_timeshift_lock
 }
 
-do_btrbk() {
-  # 3. Run btrbk send / receive
+archive_snapshots() {
+  # 4. Run btrbk send / receive
   PHASE="Btrbk send/receive"
-  log_notice "Start $PHASE"
+  log_notice "Start ${PHASE,,}"
+  # NOTE:Can be removed
   # We mount BTRBK_ARCHIVE here for test purposes.
   # In production this script will run automatically using a systemd timer, and
   # BTRBK_ARCHIVE will be mounted using a mount unit.
-  automount_by_label BTRBK_ARCHIVE $BTRBK_ARCHIVE_MOUNTPOINT
+  # mount_by_label BTRBK_ARCHIVE $BTRBK_ARCHIVE_MOUNTPOINT
 
   # if dry run, do not just show the btrbk command, but run it with dryrun
   if $DRY_RUN; then
@@ -519,10 +574,13 @@ do_btrbk() {
 
   rc=$?
 
+  # NOTE:
   # btrbk return code 10 means "Completed with warnings"
   # (often due to stray subvolumes or skipped snapshots)
+  # Should not happen because we guard against re-introduced snapshots
   if [[ $rc -eq 10 ]]; then
-    log_error "btrbk completed with warnings (RC 10). This is likely due to re-introduced snapshots."
+    # Log as an error, but continue.
+    log_error "btrbk completed with warnings (RC 10). Please investigate."
   elif [[ $rc -gt 0 ]]; then
     fail "btrbk returned a fatal error: $rc."
   fi
@@ -551,39 +609,39 @@ get_latest_snapshots () {
 }
 
 # Function to check if logger command is available
-check_logger_availability() {
-  if command -v logger &>/dev/null; then
-    echo "✓ 'logger' command is available for journal logging"
-    LOGGER_AVAILABLE=true
-  else
-    echo "✗ 'logger' command is not available. Journal logging features will be skipped."
-    LOGGER_AVAILABLE=false
-  fi
-}
+# check_logger_availability() {
+#   if command -v logger &>/dev/null; then
+#     echo "✓ 'logger' command is available for journal logging"
+#     LOGGER_AVAILABLE=true
+#   else
+#     echo "✗ 'logger' command is not available. Journal logging features will be skipped."
+#     LOGGER_AVAILABLE=false
+#   fi
+# }
 
 # Configure logging
 configure_logging () {
-  # Check if logger exists
-  if [[ ! -f "$LOGGER_PATH" ]]; then
-    echo "Error: Logger module not found at $LOGGER_PATH" >&2
+  # Check if logging module exists
+  if [[ ! -f "$LOGGING_MODULE_PATH" ]]; then
+    echo "Error: Logger module not found at $LOGGING_MODULE_PATH" >&2
     exit 1
   fi
 
   # Create log directory
-  mkdir -p "$LOGGING_DIR"
+  # mkdir -p "$LOGGING_DIR"
 
-  echo "Log file: $LOGGING_FILE"
+  # echo "Log file: $LOGGING_FILE"
 
   # Source the logger module
-  echo "Sourcing logger from: $LOGGER_PATH"
+  echo "Sourcing logger from: $LOGGING_MODULE_PATH"
   # shellcheck source=/dev/null
-  source "$LOGGER_PATH"
+  source "$LOGGING_MODULE_PATH"
   # Check if logger command is available
-  check_logger_availability
+  # check_logger_availability
 
-  # Initialize logger usingLOGGING_CONFIG
+  # Initialize logger using LOGGING_CONFIG
   echo "========== Initializing logger using config file =========="
-  init_logger --config "${LOGGER_CONFIG}" || {
+  init_logger --config "${LOGGING_CONFIG}" || {
     echo "Failed to initialize logger" >&2
     exit 1
   }
@@ -591,20 +649,25 @@ configure_logging () {
 
 # ----- start Main -----
 
+# NOTE
+# Uncomment next line when bash-logger bug is solved
 set -euo pipefail
+
+# Check for commands that do not require elevated privileges
+parse_arguments_early "$@"
 
 check_for_root
 
 configure_logging
 
-parse_input "$@"
+parse_arguments "$@"
 
 log_notice "Running $0 $*"
 
 # Mount BTRFS_ROOT
 # and keep track of mountpoints mounted by this script
 typeset -a mounted_by_this_script=()
-automount_by_label BTRFS_ROOT
+mount_by_label "$ROOT_FILESYSTEM_LABEL"
 # ROOT_UUID=$(grep -E '^[^#].+/\s+btrfs' /etc/fstab | cut -d " " -f 1 | cut -d '=' -f 2)
 # ROOT_FS_OPTIONS=$(grep -E '^[^#].+/\s+btrfs' /etc/fstab | cut -d ' ' -f 4)
 # # replace 'subvol=@' by 'subvolid=0'
@@ -616,12 +679,7 @@ automount_by_label BTRFS_ROOT
 
 # Mount btrbk_archive here - 'btrbk list latest' REQUIRES BTRBK_ARCHIVE mounted
 #
-automount_by_label BTRBK_ARCHIVE
-# Get latest snapshots per subvolume.
-# Used to decide which timeshift snapshots we want to process:
-# Snapshots older than the latest snapshot can be skipped.
-typeset -A LATEST_SNAPSHOTS
-get_latest_snapshots
+mount_by_label "$ARCHIVE_FILESYSTEM_LABEL"
 
 # 'EXIT' catches any termination of the script
 trap cleanup EXIT
@@ -629,25 +687,18 @@ trap cleanup EXIT
 case $COMMAND in
   clone )
     # clone only
-    do_clone
+    clone_timeshift_snapshots
     ;;
   btrbk )
     # btrbk only
-    do_btrbk
+    archive_snapshots
     ;;
   run )
-    do_clone
-    do_btrbk
     # clone AND btrbk
-    ;;
-  version )
-    # show version
-    log_info "timeshift-btrbk-bridge version=$VERSION"
-    btrbk --version
-    exit 0
+    clone_timeshift_snapshots
+    archive_snapshots
     ;;
   * )
-    # invalid command
     fail "invalid command $COMMAND."
     ;;
 esac

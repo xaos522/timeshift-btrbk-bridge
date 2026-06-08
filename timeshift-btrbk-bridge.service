@@ -11,13 +11,15 @@ OnFailure=systemd-service-failure@%n.service
 Type=oneshot
 User=root
 Environment="HOME=/root"
+TimeoutStartSec=infinity
+ExecStartPre=/usr/local/bin/wait-for-backup-drive.sh
 ExecStart=ionice -c 3 /usr/local/bin/timeshift-btrbk-bridge.sh -l info run
 # Trigger the notification script after success
-# ExecStartPost=/usr/local/bin/send-desktop-notification.sh -i timeshift -U low "Timeshift btrbk bridge" "Timeshift btrbk bridge completed successfully."
+ExecStartPost=/usr/local/bin/send-desktop-notification.sh -i timeshift -U low "Timeshift btrbk bridge" "Success."
 
 # --- FAST RETRY CONFIGURATION ---
-Restart=on-failure
+# Restart=on-failure
 # Wait 3 seconds between attempts
-RestartSec=3s
+# RestartSec=3s
 # Try up to 10 times before completely giving up
-StartLimitBurst=10
+# StartLimitBurst=10
