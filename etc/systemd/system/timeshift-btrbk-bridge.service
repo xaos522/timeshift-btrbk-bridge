@@ -1,25 +1,26 @@
 # /etc/systemd/system/timeshift-btrbk-bridge.service
 [Unit]
 Description=Timeshift to btrbk bridge service
-# Wait for timeshift to finish, and abort if timeshift fails
-Requires=timeshift.service
-After=timeshift.service
-# Trigger the failure service if this service fails
 OnFailure=systemd-service-failure@%n.service
+
+# Core Chain Logic: Run AFTER timeshift finishes.
+# If timeshift fails, BindsTo ensures this service is aborted/skipped.
+After=timeshift.service
+Wants=timeshift.service
+
+# Hardware Dependency
+Requires=dev-disk-by\x2dlabel-BTRBK_ARCHIVE.device
+After=dev-disk-by\x2dlabel-BTRBK_ARCHIVE.device
 
 [Service]
 Type=oneshot
 User=root
 Environment="HOME=/root"
-TimeoutStartSec=infinity
-ExecStartPre=/usr/local/bin/wait-for-backup-drive.sh
-ExecStart=ionice -c 3 /usr/local/bin/timeshift-btrbk-bridge.sh -l info run
-# Trigger the notification script after success
-ExecStartPost=/usr/local/bin/send-desktop-notification.sh -i timeshift -U low "Timeshift btrbk bridge" "Success."
+TimeoutStartSec=300
 
-# --- FAST RETRY CONFIGURATION ---
-# Restart=on-failure
-# Wait 3 seconds between attempts
-# RestartSec=3s
-# Try up to 10 times before completely giving up
-# StartLimitBurst=10
+# Triggers only if the backup drive is missing when timeshift finishes
+ExecStartPre=/usr/local/bin/wait-for-backup-drive.sh
+
+# Runs after the drive is detected
+ExecStart=ionice -c 3 /usr/local/bin/timeshift-btrbk-bridge.sh -l info run
+ExecStartPost=/usr/local/bin/send-desktop-notification.sh -i timeshift -U low "Timeshift btrbk bridge" "Success."

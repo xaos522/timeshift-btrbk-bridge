@@ -1,0 +1,9 @@
+# /etc/systemd/system/mnt-btrbk_archive.mount
+[Unit]
+Description=Timeshift btrbk Target Archive Drive
+
+[Mount]
+What=/dev/disk/by-label/BTRBK_ARCHIVE
+Where=/mnt/btrbk_archive
+Type=btrfs
+Options=defaults,noatime,compress=zstd:6,autodefrag,commit=120

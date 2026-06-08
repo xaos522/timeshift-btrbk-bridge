@@ -1,0 +1,11 @@
+# /etc/systemd/system/timeshift.service
+[Unit]
+Description=Timeshift snapshot service
+OnFailure=systemd-service-failure@%n.service
+
+[Service]
+Type=oneshot
+User=root
+Environment="HOME=/root"
+ExecStart=/usr/local/bin/timeshift --check --scripted
+ExecStartPost=/usr/local/bin/send-desktop-notification.sh -i timeshift -U low "Timeshift" "Snapshot creation completed successfully."
