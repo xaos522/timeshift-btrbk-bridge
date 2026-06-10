@@ -4,21 +4,27 @@ Description=Timeshift to btrbk bridge service
 OnFailure=systemd-service-failure@%n.service
 
 # Core Chain Logic: Run AFTER timeshift finishes.
-# If timeshift fails, BindsTo ensures this service is aborted/skipped.
 After=timeshift.service
 Wants=timeshift.service
 
 # Hardware Dependency
-Requires=dev-disk-by\x2dlabel-BTRBK_ARCHIVE.device
-After=dev-disk-by\x2dlabel-BTRBK_ARCHIVE.device
+# NOTE:
+# Removed. After a reboot, the .device unit does not exist. It is created when
+# the backup drive is connected to the system.
+# With both lines enabled, the unit fails with status 'dependencies'.
+# Requires=dev-disk-by\x2dlabel-BTRBK_ARCHIVE.device
+# After=dev-disk-by\x2dlabel-BTRBK_ARCHIVE.device
 
 [Service]
 Type=oneshot
 User=root
 Environment="HOME=/root"
-TimeoutStartSec=300
+TimeoutStartSec=60
 
 # Triggers only if the backup drive is missing when timeshift finishes
+# Sends desktop notification to mount the backup drive
+# Waits for the device to be connected, max TimeoutStartSec seconds
+# Mounts the drive when it is detected by the kernel
 ExecStartPre=/usr/local/bin/wait-for-backup-drive.sh
 
 # Runs after the drive is detected
