@@ -3,9 +3,10 @@
 Description=Timeshift to btrbk bridge service
 OnFailure=systemd-service-failure@%n.service
 
+# NOTE: Disabled After timeshift dependency
 # Core Chain Logic: Run AFTER timeshift finishes.
-After=timeshift.service
-Wants=timeshift.service
+# After=timeshift.service
+# Wants=timeshift.service
 
 # Hardware Dependency
 # NOTE:
@@ -19,7 +20,8 @@ Wants=timeshift.service
 Type=oneshot
 User=root
 Environment="HOME=/root"
-TimeoutStartSec=60
+# Allow the entire sequence (waiting, mounting, and syncing) to run to completion
+TimeoutStartSec=infinity
 
 # Triggers only if the backup drive is missing when timeshift finishes
 # Sends desktop notification to mount the backup drive

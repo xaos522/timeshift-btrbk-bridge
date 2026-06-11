@@ -7,32 +7,48 @@
 
 # NOTE:
 # The script will enter an infinite loop when the device is not connected or
-# the device is connected, but does not show up on the expected DISK_PATH.
-# When run from the command line it needs to be stopped.
-# When run from a systemd service, make sure to set an appropriate timeout (TimeoutStartSec=).
+# when the device is connected, but does not show up on the expected DISK_PATH.
+# NOTE: timeout issue
+# TimeoutStartSec was set to 60s. However, for TYPE=Oneshot services,
+# the service is never considered fully "started" until the main
+# ExecStart script exits with a success code.
+# Therefore, TimeoutStartSec is now set to infinity, to allow scripts to finish
+# without timeouts, AND
+# We MUST set our own timeout to exit with error code 1 within a reasonable time interval
 
 set -euo pipefail
 
-DRIVE_NAME="Seagate BUP BK (0304)"              # Name of the drive used in inotify-send
-DISK_PATH="/dev/disk/by-label/BTRBK_ARCHIVE"    # Path to the btrbk archive partition
-MOUNT_PATH="/mnt/btrbk_archive"                 # Mountpoint for the btrbk archive partition
+typeset -r DRIVE_NAME="Seagate BUP BK (0304)"            # Name of the drive used in inotify-send
+typeset -r DISK_PATH="/dev/disk/by-label/BTRBK_ARCHIVE"  # Path to the btrbk archive partition
+typeset -r MOUNT_PATH="/mnt/btrbk_archive"               # Mountpoint for the btrbk archive partition
+typeset -i -r TIMEOUT=300                                # Timeout seconds to wait for the drive
 
-# Loop until the external USB is detected by the kernel
-while [ ! -b "$DISK_PATH" ]; do
+typeset -i START_SECONDS
+START_SECONDS=$(date +%s)
+
+# Loop until the external USB is detected by the kernel or timeout is reached
+typeset -i i
+i=1 # Make sure i is set (and option -u does not kill the script)
+while [[ ! -b "$DISK_PATH" ]]; do
   /usr/local/bin/send-desktop-notification.sh \
     -i drive-harddisk \
     -U normal \
     "Backup Drive Required" \
     "Please connect '$DRIVE_NAME' to resume the Timeshift-btrbk bridge."
 
-  # Check for the disk every second for 20 seconds
-  typeset -i i
-  i=1                           # Make sure i is set (and option -u does not kill the script)
-  for i in {1..20}; do
+  # Check for the disk every second.
+  # Send the notification every 30s.
+  # Abort the script when timeout is exceeded
+  for i in {1..60}; do
     if [ -b "$DISK_PATH" ]; then
       break 2
+    elif (( $(date +%s) - START_SECONDS >= TIMEOUT )); then
+      # Timeout exceeded
+      echo "Timeout waiting for $DRIVE_NAME exceeded. Abort."
+      exit 1
+    else
+      sleep 1
     fi
-    sleep 1
   done
 done
 
