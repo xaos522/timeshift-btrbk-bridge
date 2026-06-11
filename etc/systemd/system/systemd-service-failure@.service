@@ -1,0 +1,15 @@
+# /etc/systemd/system/systemd-service-failure@.service
+[Unit]
+Description=Systemd Service Failure Monitor for %i
+
+[Service]
+Type=oneshot
+User=root
+Environment="HOME=/root"
+
+# ExecStart extracts the service instance name (%i) and passes it cleanly
+ExecStart=/usr/local/bin/send-desktop-notification.sh \
+    -i dialog-error \
+    -U critical \
+    "Systemd Service Failed" \
+    "The service '%i' has crashed or timed out. Check journalctl -xeu %i for details."
