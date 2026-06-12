@@ -1,16 +1,14 @@
 # /etc/systemd/system/timeshift.timer
 [Unit]
-Description=Run timeshift --check 5 min after boot and hourly thereafter
+Description=Run 'timeshift --check' at the start of every hour
 
 [Timer]
+# Run exactly at the start of every hour
+OnCalendar=hourly
+# If the machine was turned off during a scheduled slot, run it immediately on boot
+# Persistent=true
 # Targets the snapshot service explicitly
 Unit=timeshift.service
-# Run 5 minutes after boot
-OnBootSec=5min
-# Run every 1 hour after the previous run finishes
-OnUnitActiveSec=1h
-# Keeps wakeups efficient and accurate within 5 minutes
-AccuracySec=5min
 
 [Install]
 WantedBy=timers.target

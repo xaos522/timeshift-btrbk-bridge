@@ -1,0 +1,14 @@
+# /etc/systemd/system/timeshift-btrbk-bridge.timer
+[Unit]
+Description=Run 'timeshift-btrbk-bridge' at *:10:00 evey day
+
+[Timer]
+# Run 10 minutes after the start of every hour
+OnCalendar=*-*-* *:10:00
+# If the machine was turned off during a scheduled slot, run it immediately on boot
+# Persistent=true
+# Targets the timeshift-btrbk-bridge  service explicitly
+Unit=timeshift-btrbk-bridge.service
+
+[Install]
+WantedBy=timers.target

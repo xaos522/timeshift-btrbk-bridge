@@ -27,6 +27,7 @@ install:
 		install --verbose -Dm644 -t "$(ETC_DIR)/systemd/system/" ./etc/systemd/system/mnt-btrbk_archive.mount; \
 		install -v -Dm644 -t "$(ETC_DIR)/systemd/system/" ./etc/systemd/system/systemd-service-failure@.service; \
 		install -v -Dm644 -t "$(ETC_DIR)/systemd/system/" ./etc/systemd/system/timeshift-btrbk-bridge.service; \
+		install -v -Dm644 -t "$(ETC_DIR)/systemd/system/" ./etc/systemd/system/timeshift-btrbk-bridge.timer; \
 		install -v -Dm644 -t "$(ETC_DIR)/systemd/system/" ./etc/systemd/system/timeshift.service; \
 		install -v -Dm644 -t "$(ETC_DIR)/systemd/system/" ./etc/systemd/system/timeshift.timer; \
 		systemctl daemon-reload; \
@@ -48,6 +49,7 @@ uninstall:
 		rm -v "$(ETC_DIR)/systemd/system/mnt-btrbk_archive.mount"; \
 		rm -v "$(ETC_DIR)/systemd/system/systemd-service-failure@.service"; \
 		rm -v "$(ETC_DIR)/systemd/system/timeshift-btrbk-bridge.service"; \
+		rm -v "$(ETC_DIR)/systemd/system/timeshift-btrbk-bridge.timer"; \
 		rm -v "$(ETC_DIR)/systemd/system/timeshift.service"; \
 		rm -v "$(ETC_DIR)/systemd/system/timeshift.timer"; \
 		systemctl daemon-reload; \
