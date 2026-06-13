@@ -6,6 +6,9 @@ typeset -r TAG="timeshift-btrbk-bridge"               # Script TAG
 typeset -r ROOT_FILESYSTEM_LABEL="BTRFS_ROOT"         # Label of root Btrfs filesystem
 typeset -r BTRFS_ROOT_MOUNTPOINT="/mnt/btrfs_root"    # Mount point for root volume
 typeset -r TIMESHIFT_LOCK="/var/lock/timeshift/lock"  # Timeshift lock file
+# Ensure the lock directory exists before any other operations
+mkdir -p "$(dirname $TIMESHIFT_LOCK)"
+# ... rest of your script ...
 # Path to timeshift snapshots
 typeset -r TIMESHIFT_SNAPSHOTS_DIR="${BTRFS_ROOT_MOUNTPOINT}/timeshift-btrfs/snapshots"
 # Path to btrbk snapshots (= btrbk sink)
